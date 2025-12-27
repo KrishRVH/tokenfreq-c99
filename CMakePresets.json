@@ -1,0 +1,107 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "WC_WERROR": "ON"
+      }
+    },
+    {
+      "name": "clang-stronghash",
+      "inherits": "clang",
+      "displayName": "Clang (ASan/UBSan + WC_HASH_STRONG)",
+      "cacheVariables": {
+        "WC_HASH_STRONG": "ON"
+      }
+    },
+    {
+      "name": "clang",
+      "inherits": "base",
+      "displayName": "Clang (Debug + ASan/UBSan)",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "gcc",
+      "inherits": "base",
+      "displayName": "GCC (Debug + ASan/UBSan)",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "compcert",
+      "inherits": "base",
+      "displayName": "CompCert (ccomp, no sanitizers)",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "ccomp",
+        "ENABLE_SANITIZERS": "OFF"
+      }
+    },
+    {
+      "name": "mingw",
+      "inherits": "base",
+      "displayName": "MinGW-w64 Windows cross (static exe)",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/mingw-w64.cmake",
+        "ENABLE_SANITIZERS": "OFF",
+        "WC_MINGW_STATIC": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "clang",    "configurePreset": "clang" },
+    { "name": "clang-stronghash", "configurePreset": "clang-stronghash" },
+    { "name": "gcc",      "configurePreset": "gcc" },
+    { "name": "compcert", "configurePreset": "compcert" },
+    { "name": "mingw",    "configurePreset": "mingw" }
+  ],
+  "testPresets": [
+    {
+      "name": "clang",
+      "configurePreset": "clang",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "LSAN_OPTIONS": "detect_leaks=0"
+      }
+    },
+    {
+      "name": "clang-stronghash",
+      "configurePreset": "clang-stronghash",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "LSAN_OPTIONS": "detect_leaks=0"
+      }
+    },
+    {
+      "name": "gcc",
+      "configurePreset": "gcc",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "LSAN_OPTIONS": "detect_leaks=0"
+      }
+    },
+    {
+      "name": "compcert",
+      "configurePreset": "compcert",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

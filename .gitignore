@@ -1,0 +1,15 @@
+# Build Systems
+/build*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+wordcount
+wordcount_c
+
+# IDE
+.idea/

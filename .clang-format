@@ -1,0 +1,88 @@
+---
+# C-idiomatic formatting based on LLVM style
+# Emphasizes readability and consistency for C codebases
+
+BasedOnStyle: LLVM
+Language: Cpp  # clang-format uses Cpp mode for C as well
+InsertNewlineAtEOF: true
+
+# --- Indentation and width ---
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+ContinuationIndentWidth: 8
+IndentCaseLabels: true
+IndentCaseBlocks: false
+IndentGotoLabels: false
+IndentPPDirectives: None
+IndentExternBlock: NoIndent
+IndentWrappedFunctionNames: false
+
+# --- Braces and control flow ---
+BreakBeforeBraces: Linux
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+
+# --- Function signatures ---
+AlwaysBreakAfterReturnType: None
+AlwaysBreakAfterDefinitionReturnType: None
+BinPackParameters: false
+BinPackArguments: false
+
+# --- Expressions and operators ---
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpacesInAngles: Never
+SpaceInEmptyParentheses: false
+SpaceAfterCStyleCast: false
+SpaceBeforeCaseColon: false
+
+# --- Pointers and qualifiers ---
+# Align * with the variable name (C style: char *p, not char* p)
+DerivePointerAlignment: false
+PointerAlignment: Right
+SpaceAroundPointerQualifiers: Default
+ReferenceAlignment: Right
+
+# --- Trailing comments ---
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 2
+
+# --- Includes ---
+SortIncludes: Never
+IncludeBlocks: Preserve
+
+# --- Alignments ---
+AlignAfterOpenBracket: Align
+AlignOperands: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: None
+AlignArrayOfStructures: None
+AlignEscapedNewlines: Left
+
+# --- Empty lines ---
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+SeparateDefinitionBlocks: Leave
+
+# --- Miscellaneous ---
+Cpp11BracedListStyle: false
+BreakStringLiterals: true
+
+# Preserve hand-formatted DESIGN blocks / tables / ASCII layouts.
+ReflowComments: false
+
+InsertBraces: false
+RemoveBracesLLVM: false

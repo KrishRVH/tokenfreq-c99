@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+include("${CMAKE_CURRENT_LIST_DIR}/wordcountTargets.cmake")
+check_required_components(wordcount)
+
+# Compatibility aliases (old exported names)
+if(TARGET wordcount::wordcount AND NOT TARGET wordcount::wordcount_lib)
+  add_library(wordcount::wordcount_lib ALIAS wordcount::wordcount)
+endif()
+if(TARGET wordcount::wordcount_heap AND NOT TARGET wordcount::wordcount_lib_heap)
+  add_library(wordcount::wordcount_lib_heap ALIAS wordcount::wordcount_heap)
+endif()
+if(TARGET wordcount::wordcount_tiny AND NOT TARGET wordcount::wordcount_lib_tiny)
+  add_library(wordcount::wordcount_lib_tiny ALIAS wordcount::wordcount_tiny)
+endif()

@@ -1,0 +1,409 @@
+cmake_minimum_required(VERSION 3.20)
+project(wordcount VERSION 5.0.0 LANGUAGES C)
+
+include(GNUInstallDirs)
+
+# --- Options ---
+option(ENABLE_SANITIZERS "Enable Address+UB sanitizers (GCC/Clang only)" OFF)
+option(WC_WERROR "Treat compiler warnings as errors when supported" OFF)
+option(WC_MINGW_STATIC "Static link MinGW executables (helps running under Wine)" ON)
+option(WC_BUILD_CLI "Build the wc CLI tool" ON)
+option(WC_INSTALL "Install library + CMake package config" OFF)
+option(WC_BUILD_SHARED "Build shared libraries (in addition to static)" OFF)
+option(WC_INSTALL_PKGCONFIG "Install pkg-config metadata when WC_INSTALL is ON" ON)
+option(WC_HASH_STRONG "Use keyed SipHash-2-4 instead of FNV-1a" OFF)
+option(WC_USE_LIBC_STRING "Use libc string/memory functions" ON)
+option(WC_ASCII_ONLY "Restrict scanning to ASCII letters" ON)
+option(WC_ENABLE_VALIDATE "Compile wc_validate() invariant checks" OFF)
+option(WC_BUILD_VARIANTS "Build heap/tiny library variants (same symbols; do not link together)" OFF)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Standard, project-wide defaults (still allow per-target overrides)
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+include(CTest) # provides BUILD_TESTING and enables testing when ON
+
+if(BUILD_TESTING)
+  set(WC_BUILD_VARIANTS ON)
+endif()
+
+# Detect CompCert by compiler executable name (CMake may not have a built-in ID)
+get_filename_component(WC_C_COMPILER_BASENAME "${CMAKE_C_COMPILER}" NAME)
+set(WC_COMPILER_IS_COMPCERT OFF)
+if(WC_C_COMPILER_BASENAME MATCHES "^(ccomp|ccomp\\.exe)$")
+  set(WC_COMPILER_IS_COMPCERT ON)
+endif()
+
+function(wc_apply_common target)
+  get_target_property(_type ${target} TYPE)
+  set(_is_interface OFF)
+  if(_type STREQUAL "INTERFACE_LIBRARY")
+    set(_is_interface ON)
+  endif()
+
+  if(_is_interface)
+    target_include_directories(${target} INTERFACE
+      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/wordcount>
+    )
+    set(_opt_scope INTERFACE)
+    set(_def_scope INTERFACE)
+  elseif(_type STREQUAL "STATIC_LIBRARY" OR _type STREQUAL "SHARED_LIBRARY" OR
+         _type STREQUAL "MODULE_LIBRARY" OR _type STREQUAL "OBJECT_LIBRARY")
+    target_include_directories(${target} PUBLIC
+      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/wordcount>
+    )
+    set(_opt_scope PRIVATE)
+    set(_def_scope PUBLIC)
+  else()
+    target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}")
+    set(_opt_scope PRIVATE)
+    set(_def_scope PRIVATE)
+  endif()
+
+  # Warnings: keep strict for GCC/Clang, conservative for CompCert, MSVC-friendly
+  if(MSVC)
+    # /permissive- is primarily a C++ conformance switch; this is a C-only project.
+    target_compile_options(${target} ${_opt_scope} /W4)
+    if(WC_WERROR)
+      target_compile_options(${target} ${_opt_scope} /WX)
+    endif()
+  elseif(WC_COMPILER_IS_COMPCERT)
+    # CompCert supports -Wall and -W<warning>/ -Werror (but not all GCC warnings)
+    target_compile_options(${target} ${_opt_scope} -Wall)
+    if(WC_WERROR)
+      target_compile_options(${target} ${_opt_scope} -Werror)
+    endif()
+  else()
+    target_compile_options(${target} ${_opt_scope}
+      $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>
+    )
+    if(WC_WERROR)
+      target_compile_options(${target} ${_opt_scope} -Werror)
+    endif()
+  endif()
+
+  target_compile_definitions(${target} ${_def_scope}
+    WC_HASH_STRONG=$<IF:$<BOOL:${WC_HASH_STRONG}>,1,0>
+    WC_USE_LIBC_STRING=$<IF:$<BOOL:${WC_USE_LIBC_STRING}>,1,0>
+    WC_ASCII_ONLY=$<IF:$<BOOL:${WC_ASCII_ONLY}>,1,0>
+    WC_ENABLE_VALIDATE=$<IF:$<BOOL:${WC_ENABLE_VALIDATE}>,1,0>
+  )
+
+  # Visibility: default to hidden for shared libs, export via WC_API
+  if(_type STREQUAL "SHARED_LIBRARY")
+    set_target_properties(${target} PROPERTIES
+      C_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN YES
+    )
+  endif()
+
+  # Sanitizers: only on native GCC/Clang (not MinGW, not MSVC, not CompCert)
+  if(ENABLE_SANITIZERS AND NOT _is_interface)
+    if(NOT MSVC AND NOT MINGW AND NOT WC_COMPILER_IS_COMPCERT)
+      target_compile_options(${target} PRIVATE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+      )
+      get_target_property(_type ${target} TYPE)
+      if(_type STREQUAL "EXECUTABLE" OR _type STREQUAL "SHARED_LIBRARY" OR _type STREQUAL "MODULE_LIBRARY")
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+      endif()
+    endif()
+  endif()
+
+  # MinGW static linking (executables only)
+  if(WIN32 AND NOT MSVC AND WC_MINGW_STATIC)
+    get_target_property(_type ${target} TYPE)
+    if(_type STREQUAL "EXECUTABLE")
+      target_link_options(${target} PRIVATE -static)
+    endif()
+  endif()
+endfunction()
+
+set(WC_BUILD_SHARED_LIB OFF)
+if(WC_BUILD_SHARED OR BUILD_SHARED_LIBS)
+  set(WC_BUILD_SHARED_LIB ON)
+endif()
+
+# =============================================================================
+# Core library variants
+# =============================================================================
+
+add_library(wordcount_lib STATIC wordcount.c)
+wc_apply_common(wordcount_lib)
+set_target_properties(wordcount_lib PROPERTIES
+  OUTPUT_NAME wordcount
+  EXPORT_NAME wordcount
+  VERSION ${PROJECT_VERSION}
+  SOVERSION ${PROJECT_VERSION_MAJOR}
+)
+add_library(wordcount::wordcount ALIAS wordcount_lib)
+
+if(WC_BUILD_SHARED_LIB)
+  add_library(wordcount_lib_shared SHARED wordcount.c)
+  wc_apply_common(wordcount_lib_shared)
+  set_target_properties(wordcount_lib_shared PROPERTIES
+    OUTPUT_NAME wordcount_shared
+    EXPORT_NAME wordcount_shared
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+  )
+  target_compile_definitions(wordcount_lib_shared PRIVATE WC_BUILD_SHARED)
+  target_compile_definitions(wordcount_lib_shared PUBLIC WC_SHARED)
+  add_library(wordcount::wordcount_shared ALIAS wordcount_lib_shared)
+endif()
+
+if(WC_BUILD_VARIANTS)
+  add_library(wordcount_lib_heap STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_heap PUBLIC WC_STACK_BUFFER=0)
+  wc_apply_common(wordcount_lib_heap)
+  set_target_properties(wordcount_lib_heap PROPERTIES
+    OUTPUT_NAME wordcount_heap
+    EXPORT_NAME wordcount_heap
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+  )
+  add_library(wordcount::wordcount_heap ALIAS wordcount_lib_heap)
+
+  if(WC_BUILD_SHARED_LIB)
+    add_library(wordcount_lib_heap_shared SHARED wordcount.c)
+    target_compile_definitions(wordcount_lib_heap_shared PUBLIC WC_STACK_BUFFER=0)
+    wc_apply_common(wordcount_lib_heap_shared)
+    set_target_properties(wordcount_lib_heap_shared PROPERTIES
+      OUTPUT_NAME wordcount_heap_shared
+      EXPORT_NAME wordcount_heap_shared
+      VERSION ${PROJECT_VERSION}
+      SOVERSION ${PROJECT_VERSION_MAJOR}
+    )
+    target_compile_definitions(wordcount_lib_heap_shared PRIVATE WC_BUILD_SHARED)
+    target_compile_definitions(wordcount_lib_heap_shared PUBLIC WC_SHARED)
+    add_library(wordcount::wordcount_heap_shared ALIAS wordcount_lib_heap_shared)
+  endif()
+
+  add_library(wordcount_lib_tiny STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_tiny PUBLIC
+    WC_STACK_BUFFER=0
+    WC_MIN_INIT_CAP=8
+    WC_MIN_BLOCK_SZ=64
+    WC_MAX_WORD=32
+  )
+  wc_apply_common(wordcount_lib_tiny)
+  set_target_properties(wordcount_lib_tiny PROPERTIES
+    OUTPUT_NAME wordcount_tiny
+    EXPORT_NAME wordcount_tiny
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+  )
+  add_library(wordcount::wordcount_tiny ALIAS wordcount_lib_tiny)
+
+  if(WC_BUILD_SHARED_LIB)
+    add_library(wordcount_lib_tiny_shared SHARED wordcount.c)
+    target_compile_definitions(wordcount_lib_tiny_shared PUBLIC
+      WC_STACK_BUFFER=0
+      WC_MIN_INIT_CAP=8
+      WC_MIN_BLOCK_SZ=64
+      WC_MAX_WORD=32
+    )
+    wc_apply_common(wordcount_lib_tiny_shared)
+    set_target_properties(wordcount_lib_tiny_shared PROPERTIES
+      OUTPUT_NAME wordcount_tiny_shared
+      EXPORT_NAME wordcount_tiny_shared
+      VERSION ${PROJECT_VERSION}
+      SOVERSION ${PROJECT_VERSION_MAJOR}
+    )
+    target_compile_definitions(wordcount_lib_tiny_shared PRIVATE WC_BUILD_SHARED)
+    target_compile_definitions(wordcount_lib_tiny_shared PUBLIC WC_SHARED)
+    add_library(wordcount::wordcount_tiny_shared ALIAS wordcount_lib_tiny_shared)
+  endif()
+endif()
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+if(WC_BUILD_CLI)
+  add_executable(wc wc_main.c)
+  target_link_libraries(wc PRIVATE wordcount_lib)
+  wc_apply_common(wc)
+  if(WIN32)
+    target_link_libraries(wc PRIVATE shell32)
+  endif()
+endif()
+
+# =============================================================================
+# Tests
+# =============================================================================
+
+if(BUILD_TESTING)
+  include(CheckLanguage)
+  check_language(CXX)
+  if(CMAKE_CXX_COMPILER)
+    enable_language(CXX)
+  endif()
+
+  function(create_test_variant name lib)
+    add_executable(${name} wc_test.c)
+    target_link_libraries(${name} PRIVATE ${lib})
+    wc_apply_common(${name})
+    add_test(NAME ${name} COMMAND ${name})
+  endfunction()
+
+  create_test_variant(wc_test      wordcount_lib)
+  if(TARGET wordcount_lib_heap)
+    create_test_variant(wc_test_heap wordcount_lib_heap)
+  endif()
+  if(TARGET wordcount_lib_tiny)
+    create_test_variant(wc_test_tiny wordcount_lib_tiny)
+  endif()
+
+  add_executable(wc_test_collision wc_test_collision.c)
+  target_compile_definitions(wc_test_collision PRIVATE WC_TEST_FORCE_HASH=1)
+  target_link_libraries(wc_test_collision PRIVATE wordcount_lib)
+  wc_apply_common(wc_test_collision)
+  add_test(NAME wc_test_collision COMMAND wc_test_collision)
+
+  # Portable fault-injection (malloc/realloc failures at every site)
+  add_library(wordcount_lib_fault STATIC wordcount.c)
+  target_sources(wordcount_lib_fault PRIVATE wc_fault_alloc.c)
+  target_compile_definitions(wordcount_lib_fault PUBLIC
+    WC_MALLOC=wc_fault_malloc
+    WC_REALLOC=wc_fault_realloc
+    WC_FREE=wc_fault_free
+  )
+  target_compile_options(wordcount_lib_fault PRIVATE
+    $<$<C_COMPILER_ID:MSVC>:/FIwc_fault_alloc.h>
+    $<$<NOT:$<C_COMPILER_ID:MSVC>>:-include wc_fault_alloc.h>
+  )
+  wc_apply_common(wordcount_lib_fault)
+
+  add_executable(wc_test_fault wc_test_fault.c)
+  target_link_libraries(wc_test_fault PRIVATE wordcount_lib_fault)
+  wc_apply_common(wc_test_fault)
+  add_test(NAME wc_test_fault COMMAND wc_test_fault)
+
+  add_library(wordcount_lib_fault_heap STATIC wordcount.c)
+  target_sources(wordcount_lib_fault_heap PRIVATE wc_fault_alloc.c)
+  target_compile_definitions(wordcount_lib_fault_heap PUBLIC
+    WC_STACK_BUFFER=0
+    WC_MALLOC=wc_fault_malloc
+    WC_REALLOC=wc_fault_realloc
+    WC_FREE=wc_fault_free
+  )
+  target_compile_options(wordcount_lib_fault_heap PRIVATE
+    $<$<C_COMPILER_ID:MSVC>:/FIwc_fault_alloc.h>
+    $<$<NOT:$<C_COMPILER_ID:MSVC>>:-include wc_fault_alloc.h>
+  )
+  wc_apply_common(wordcount_lib_fault_heap)
+
+  add_executable(wc_test_fault_heap wc_test_fault.c)
+  target_link_libraries(wc_test_fault_heap PRIVATE wordcount_lib_fault_heap)
+  wc_apply_common(wc_test_fault_heap)
+  add_test(NAME wc_test_fault_heap COMMAND wc_test_fault_heap)
+
+  # Differential fuzzing target (build-only; run manually). Only build under Clang
+  # with libFuzzer available (skip on Apple toolchains where the runtime may be
+  # absent in CI images).
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
+    add_executable(wc_fuzz_diff wc_fuzz_diff.c wordcount.c)
+    wc_apply_common(wc_fuzz_diff)
+    target_compile_options(wc_fuzz_diff PRIVATE -fsanitize=fuzzer-no-link)
+    target_link_options(wc_fuzz_diff PRIVATE -fsanitize=fuzzer)
+  endif()
+
+  function(wc_add_compile_only target src)
+    add_library(${target} OBJECT ${src})
+    wc_apply_common(${target})
+    if(MSVC)
+      target_compile_options(${target} PRIVATE /WX)
+    else()
+      target_compile_options(${target} PRIVATE -Werror)
+    endif()
+  endfunction()
+
+  wc_add_compile_only(wc_compile_static_init tests/compile_static_init.c)
+
+  if(CMAKE_CXX_COMPILER)
+    wc_add_compile_only(wc_compile_cpp tests/compile_cpp.cpp)
+    set_target_properties(wc_compile_cpp PROPERTIES
+      CXX_STANDARD 11
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS OFF
+    )
+  else()
+    message(STATUS "C++ compiler not found; skipping C++ compile test.")
+  endif()
+
+  add_custom_target(wc_compile_checks ALL)
+  add_dependencies(wc_compile_checks wc_compile_static_init)
+  if(TARGET wc_compile_cpp)
+    add_dependencies(wc_compile_checks wc_compile_cpp)
+  endif()
+endif()
+
+if(WC_INSTALL)
+  include(CMakePackageConfigHelpers)
+
+  set(WC_INSTALL_TARGETS wordcount_lib)
+  if(TARGET wordcount_lib_shared)
+    list(APPEND WC_INSTALL_TARGETS wordcount_lib_shared)
+  endif()
+  if(TARGET wordcount_lib_heap)
+    list(APPEND WC_INSTALL_TARGETS wordcount_lib_heap)
+  endif()
+  if(TARGET wordcount_lib_heap_shared)
+    list(APPEND WC_INSTALL_TARGETS wordcount_lib_heap_shared)
+  endif()
+  if(TARGET wordcount_lib_tiny)
+    list(APPEND WC_INSTALL_TARGETS wordcount_lib_tiny)
+  endif()
+  if(TARGET wordcount_lib_tiny_shared)
+    list(APPEND WC_INSTALL_TARGETS wordcount_lib_tiny_shared)
+  endif()
+
+  install(TARGETS ${WC_INSTALL_TARGETS}
+    EXPORT wordcountTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+
+  install(FILES wordcount.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/wordcount)
+
+  configure_package_config_file(
+    ${PROJECT_SOURCE_DIR}/cmake/wordcountConfig.cmake.in
+    ${PROJECT_BINARY_DIR}/wordcountConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+  )
+
+  write_basic_package_version_file(
+    ${PROJECT_BINARY_DIR}/wordcountConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+  )
+
+  install(FILES
+    ${PROJECT_BINARY_DIR}/wordcountConfig.cmake
+    ${PROJECT_BINARY_DIR}/wordcountConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+  )
+
+  install(EXPORT wordcountTargets
+    NAMESPACE wordcount::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+  )
+
+  install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/${PROJECT_NAME})
+
+  if(WC_INSTALL_PKGCONFIG)
+    configure_file(${PROJECT_SOURCE_DIR}/cmake/wordcount.pc.in
+      ${PROJECT_BINARY_DIR}/wordcount.pc @ONLY)
+    install(FILES ${PROJECT_BINARY_DIR}/wordcount.pc
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+  endif()
+endif()
