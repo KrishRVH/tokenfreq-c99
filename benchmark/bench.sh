@@ -26,43 +26,45 @@ RUNS=8
 WARMUP=2
 SIZE_MIB=512
 CHUNK_BYTES=65536
-MAX_WORD=0              # 0 => library default (DEF_WORD), clamped internally
+MAX_WORD=0 # 0 => library default (DEF_WORD), clamped internally
 VALIDATE=0
 REGEN_CORPUS=0
 NO_DOWNLOAD=0
 PRIME_CACHE=1
-PIN_CPU=""              # e.g. "0" to pin to cpu 0 via taskset
-NICE_LEVEL=""           # e.g. "-10" (may require privileges)
+PIN_CPU=""    # e.g. "0" to pin to cpu 0 via taskset
+NICE_LEVEL="" # e.g. "-10" (may require privileges)
 OUT_ROOT="$SCRIPT_DIR/results"
-CORPUS_PATH=""          # if empty, auto-build in bench_data/
+CORPUS_PATH="" # if empty, auto-build in bench_data/
 MODES_CSV="scan,stream,scan_results"
 VARIANTS_CSV="default,heap,tiny"
-DO_CLI=0                # optional: also build+benchmark wc_main.c CLI
-QUIET=1                 # for benchmarking (no output from the bench binaries)
-ENGINE="time"           # time-based harness (reliable + captures RSS)
-PERF=0                  # best-effort perf stat capture (optional, Linux)
+DO_CLI=0 # optional: also build+benchmark wc_main.c CLI
+QUIET=1  # for benchmarking (no output from the bench binaries)
+PERF=0   # best-effort perf stat capture (optional, Linux)
 
 # ------------------------------ Styling ---------------------------------------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   BOLD=$'\033[1m'
-  DIM=$'\033[2m'
   RED=$'\033[31m'
-  GREEN=$'\033[32m'
   YELLOW=$'\033[33m'
   BLUE=$'\033[34m'
-  MAG=$'\033[35m'
-  CYAN=$'\033[36m'
   NC=$'\033[0m'
 else
-  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; MAG=""; CYAN=""; NC=""
+  BOLD=""
+  RED=""
+  YELLOW=""
+  BLUE=""
+  NC=""
 fi
 
 note() { echo "${BLUE}[INFO]${NC} $*"; }
 warn() { echo "${YELLOW}[WARN]${NC} $*" >&2; }
-die()  { echo "${RED}[ERR ]${NC} $*" >&2; exit 1; }
+die() {
+  echo "${RED}[ERR ]${NC} $*" >&2
+  exit 1
+}
 
 usage() {
-  cat <<EOF
+  cat << EOF
 Usage: $(basename "$0") [options]
 
 Corpus:
@@ -112,40 +114,104 @@ EOF
 # --------------------------- Arg parsing --------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help) usage; exit 0 ;;
-    --runs) RUNS="${2:?}"; shift 2 ;;
-    --warmup) WARMUP="${2:?}"; shift 2 ;;
-    --size-mib) SIZE_MIB="${2:?}"; shift 2 ;;
-    --chunk) CHUNK_BYTES="${2:?}"; shift 2 ;;
-    --modes) MODES_CSV="${2:?}"; shift 2 ;;
-    --variants) VARIANTS_CSV="${2:?}"; shift 2 ;;
-    --max-word) MAX_WORD="${2:?}"; shift 2 ;;
-    --corpus) CORPUS_PATH="${2:?}"; shift 2 ;;
-    --regen-corpus) REGEN_CORPUS=1; shift ;;
-    --no-download) NO_DOWNLOAD=1; shift ;;
-    --no-prime-cache) PRIME_CACHE=0; shift ;;
-    --pin-cpu) PIN_CPU="${2:?}"; shift 2 ;;
-    --nice) NICE_LEVEL="${2:?}"; shift 2 ;;
-    --out) OUT_ROOT="${2:?}"; shift 2 ;;
-    --cli) DO_CLI=1; shift ;;
-	--no-toy) DO_TOY=0; shift ;;
-    --perf) PERF=1; shift ;;
-    --verbose) QUIET=0; shift ;;
-    -v|--validate) VALIDATE=1; shift ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --runs)
+      RUNS="${2:?}"
+      shift 2
+      ;;
+    --warmup)
+      WARMUP="${2:?}"
+      shift 2
+      ;;
+    --size-mib)
+      SIZE_MIB="${2:?}"
+      shift 2
+      ;;
+    --chunk)
+      CHUNK_BYTES="${2:?}"
+      shift 2
+      ;;
+    --modes)
+      MODES_CSV="${2:?}"
+      shift 2
+      ;;
+    --variants)
+      VARIANTS_CSV="${2:?}"
+      shift 2
+      ;;
+    --max-word)
+      MAX_WORD="${2:?}"
+      shift 2
+      ;;
+    --corpus)
+      CORPUS_PATH="${2:?}"
+      shift 2
+      ;;
+    --regen-corpus)
+      REGEN_CORPUS=1
+      shift
+      ;;
+    --no-download)
+      NO_DOWNLOAD=1
+      shift
+      ;;
+    --no-prime-cache)
+      PRIME_CACHE=0
+      shift
+      ;;
+    --pin-cpu)
+      PIN_CPU="${2:?}"
+      shift 2
+      ;;
+    --nice)
+      NICE_LEVEL="${2:?}"
+      shift 2
+      ;;
+    --out)
+      OUT_ROOT="${2:?}"
+      shift 2
+      ;;
+    --cli)
+      DO_CLI=1
+      shift
+      ;;
+    --no-toy)
+      DO_TOY=0
+      shift
+      ;;
+    --perf)
+      PERF=1
+      shift
+      ;;
+    --verbose)
+      QUIET=0
+      shift
+      ;;
+    -v | --validate)
+      VALIDATE=1
+      shift
+      ;;
     *) die "Unknown argument: $1 (use --help)" ;;
   esac
 done
 
 # ------------------------------ Tools -----------------------------------------
-have() { command -v "$1" >/dev/null 2>&1; }
+have() { command -v "$1" > /dev/null 2>&1; }
 
 # Prefer clang if available, else gcc, else cc.
 CC="${CC:-}"
 if [[ -z "$CC" ]]; then
-  if have clang; then CC=clang
-  elif have gcc; then CC=gcc
-  elif have cc; then CC=cc
-  else die "No C compiler found (clang/gcc/cc)."
+  if have clang; then
+    CC=clang
+  elif have gcc; then
+    CC=gcc
+  elif have cc; then
+    CC=cc
+  else
+    die "No C compiler found (clang/gcc/cc)."
   fi
 fi
 
@@ -155,7 +221,7 @@ if have gtime; then
   TIME_BIN="gtime"
 elif [[ -x /usr/bin/time ]]; then
   # Probe whether it supports -f (GNU time)
-  if /usr/bin/time -f "%e" true >/dev/null 2>&1; then
+  if /usr/bin/time -f "%e" true > /dev/null 2>&1; then
     TIME_BIN="/usr/bin/time"
   fi
 fi
@@ -163,8 +229,10 @@ fi
 
 # Python is optional but strongly improves reporting.
 PYTHON_BIN=""
-if have python3; then PYTHON_BIN=python3
-elif have python; then PYTHON_BIN=python
+if have python3; then
+  PYTHON_BIN=python3
+elif have python; then
+  PYTHON_BIN=python
 fi
 
 # ---------------------------- Paths -------------------------------------------
@@ -178,7 +246,7 @@ mkdir -p "$BENCH_DATA_DIR" "$SRC_DIR" "$BUILD_DIR" "$BIN_DIR" "$OUT_ROOT"
 # ------------------------ Helper: file size ----------------------------------
 file_size_bytes() {
   local f="$1"
-  if stat -c%s "$f" >/dev/null 2>&1; then
+  if stat -c%s "$f" > /dev/null 2>&1; then
     stat -c%s "$f"
   else
     stat -f%z "$f"
@@ -186,7 +254,23 @@ file_size_bytes() {
 }
 cc_supports_flag() {
   local flag="$1"
-  echo 'int main(void){return 0;}' | "$CC" -x c - "$flag" -o "$BUILD_DIR/.flagtest" >/dev/null 2>&1
+  echo 'int main(void){return 0;}' | "$CC" -x c - "$flag" -o "$BUILD_DIR/.flagtest" > /dev/null 2>&1
+}
+
+split_flags() {
+  local src="$1"
+  local -n dst="$2"
+  dst=()
+  [[ -n "$src" ]] || return 0
+  local old_ifs="$IFS"
+  IFS=' '
+  # shellcheck disable=SC2034 # dst is a nameref output parameter.
+  read -r -a dst <<< "$src"
+  IFS="$old_ifs"
+}
+
+format_argv() {
+  printf '%q ' "$@"
 }
 
 # ---------------------- Environment / metadata --------------------------------
@@ -194,8 +278,8 @@ system_summary() {
   echo "date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "uname=$(uname -a)"
   echo "cc=$CC"
-  echo "cc_version=$($CC --version 2>/dev/null | head -n 1 || true)"
-  if have git && git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "cc_version=$($CC --version 2> /dev/null | head -n 1 || true)"
+  if have git && git -C "$ROOT_DIR" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
     echo "git_head=$(git -C "$ROOT_DIR" rev-parse HEAD)"
     echo "git_dirty=$(git -C "$ROOT_DIR" status --porcelain | wc -l | tr -d ' ')"
   fi
@@ -209,13 +293,13 @@ system_summary() {
     fi
     if have lscpu; then
       echo "lscpu=$(
-        lscpu 2>/dev/null | tr '\n' ';' | sed 's/;*$//'
+        lscpu 2> /dev/null | tr '\n' ';' | sed 's/;*$//'
       )"
     fi
   elif [[ "$(uname -s)" == "Darwin" ]]; then
     if have sysctl; then
-      echo "cpu_model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
-      echo "logical_cpus=$(sysctl -n hw.logicalcpu 2>/dev/null || true)"
+      echo "cpu_model=$(sysctl -n machdep.cpu.brand_string 2> /dev/null || true)"
+      echo "logical_cpus=$(sysctl -n hw.logicalcpu 2> /dev/null || true)"
     fi
   fi
 }
@@ -230,9 +314,10 @@ BOOK_URLS=(
 
 download_sources() {
   mkdir -p "$SRC_DIR"
-  if (( NO_DOWNLOAD )); then
+  if ((NO_DOWNLOAD)); then
     for url in "${BOOK_URLS[@]}"; do
-      local f="$SRC_DIR/$(basename "$url")"
+      local f
+      f="$SRC_DIR/$(basename "$url")"
       [[ -f "$f" ]] || die "--no-download set, missing source: $f"
     done
     return 0
@@ -242,7 +327,8 @@ download_sources() {
 
   note "Ensuring corpus sources exist in: $SRC_DIR"
   for url in "${BOOK_URLS[@]}"; do
-    local f="$SRC_DIR/$(basename "$url")"
+    local f
+    f="$SRC_DIR/$(basename "$url")"
     if [[ -f "$f" ]]; then
       continue
     fi
@@ -253,7 +339,7 @@ download_sources() {
 }
 
 build_corpus() {
-  local req_bytes=$(( SIZE_MIB * 1024 * 1024 ))
+  local req_bytes=$((SIZE_MIB * 1024 * 1024))
   local corpus="$BENCH_DATA_DIR/corpus_${SIZE_MIB}MiB.bin"
   local seed="$BENCH_DATA_DIR/seed.txt"
   local tmp="$BENCH_DATA_DIR/corpus.tmp"
@@ -290,11 +376,11 @@ build_corpus() {
   seed_bytes="$(file_size_bytes "$seed")"
   [[ "$seed_bytes" -gt 0 ]] || die "Seed corpus is empty."
 
-  local reps=$(( (req_bytes + seed_bytes - 1) / seed_bytes ))
+  local reps=$(((req_bytes + seed_bytes - 1) / seed_bytes))
   note "Target: $req_bytes bytes (${SIZE_MIB} MiB), seed: $seed_bytes bytes, reps: $reps"
 
   rm -f "$tmp" "$corpus"
-  for ((i=1; i<=reps; i++)); do
+  for ((i = 1; i <= reps; i++)); do
     cat "$seed" >> "$tmp"
   done
 
@@ -309,23 +395,23 @@ build_corpus() {
 
 prime_page_cache() {
   local corpus="$1"
-  (( PRIME_CACHE )) || return 0
+  ((PRIME_CACHE)) || return 0
 
   note "Priming page cache (sequential read)..."
   if have dd; then
     # status=none is GNU; suppress errors on BSD dd.
-    dd if="$corpus" of=/dev/null bs=8m status=none 2>/dev/null || \
-      dd if="$corpus" of=/dev/null bs=8m 2>/dev/null || \
-      cat "$corpus" >/dev/null
+    dd if="$corpus" of=/dev/null bs=8m status=none 2> /dev/null \
+      || dd if="$corpus" of=/dev/null bs=8m 2> /dev/null \
+      || cat "$corpus" > /dev/null
   else
-    cat "$corpus" >/dev/null
+    cat "$corpus" > /dev/null
   fi
 }
 
 # ----------------------- Benchmark harness C code ------------------------------
 write_bench_c() {
   local out="$BUILD_DIR/bench_wc.c"
-  cat > "$out" <<'EOF'
+  cat > "$out" << 'EOF'
 /*
  * bench_wc.c - benchmarking harness for wordcount library
  *
@@ -628,7 +714,7 @@ EOF
 
 write_toy_competitor_c() {
   local out="$BUILD_DIR/toyfast.c"
-  cat > "$out" <<'EOF'
+  cat > "$out" << 'EOF'
 /*
  * toyfast.c - hyper-optimized Linux-only competitor
  *
@@ -640,8 +726,8 @@ write_toy_competitor_c() {
  * Design:
  *   - mmap input
  *   - split into thread chunks w/ boundary fixups (no double counting)
- *   - per-thread open-addressed table + bump arena for key storage
- *   - merge per-thread tables into a global table (re-uses pointers, no recopy)
+ *   - per-thread open-addressed table storing pointers into the mmap input
+ *   - merge per-thread tables into a global table (pointer reuse, no key copies)
  *
  * Not robust. Built for speed and elegance.
  */
@@ -677,9 +763,11 @@ write_toy_competitor_c() {
 #if defined(__GNUC__) || defined(__clang__)
 #define HOT __attribute__((hot))
 #define AI  __attribute__((always_inline)) inline
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
 #define HOT
 #define AI inline
+#define UNLIKELY(x) (x)
 #endif
 
 static void die(const char *msg) {
@@ -713,7 +801,7 @@ static AI size_t next_pow2(size_t x) {
 }
 
 typedef struct {
-    char    *key;   /* NUL-terminated lowercase key */
+    const unsigned char *key; /* points into the mmap input */
     uint32_t len;
     uint32_t cnt;
     uint64_t h;
@@ -725,10 +813,6 @@ typedef struct {
     size_t  mask;
     size_t  len;
     size_t  threshold;
-
-    unsigned char *arena;
-    size_t arena_cap;
-    size_t arena_off;
 } Map;
 
 static void *xmap_anon(size_t n) {
@@ -737,7 +821,7 @@ static void *xmap_anon(size_t n) {
     return p;
 }
 
-static HOT void map_init(Map *m, size_t cap_hint, size_t arena_cap) {
+static HOT void map_init(Map *m, size_t cap_hint) {
     memset(m, 0, sizeof *m);
 
     /* Clamp for sanity: too small => resize thrash, too big => waste. */
@@ -754,20 +838,28 @@ static HOT void map_init(Map *m, size_t cap_hint, size_t arena_cap) {
     m->mask = cap - 1;
     m->len = 0;
     m->threshold = (cap * 4) / 5; /* ~0.80 load */
-
-    if (arena_cap < (1u << 20)) arena_cap = (1u << 20);
-    m->arena = (unsigned char *)xmap_anon(arena_cap);
-    if (!m->arena) die("mmap(arena)");
-    madvise(m->arena, arena_cap, MADV_HUGEPAGE);
-    m->arena_cap = arena_cap;
-    m->arena_off = 0;
 }
 
-static AI unsigned char *arena_alloc(Map *m, size_t n) {
-    size_t off = m->arena_off;
-    if (off + n > m->arena_cap) die("arena exhausted (toyfast)");
-    m->arena_off = off + n;
-    return m->arena + off;
+static AI uint64_t load64u(const unsigned char *p) {
+    uint64_t v;
+    memcpy(&v, p, sizeof v);
+    return v;
+}
+
+static AI int key_eq_fold(const unsigned char *a, const unsigned char *b, uint32_t n) {
+    const uint64_t lower = 0x2020202020202020ULL;
+
+    while (n >= 8) {
+        if ((load64u(a) | lower) != (load64u(b) | lower)) return 0;
+        a += 8;
+        b += 8;
+        n -= 8;
+    }
+    while (n) {
+        if (((unsigned)*a++ | 32u) != ((unsigned)*b++ | 32u)) return 0;
+        n--;
+    }
+    return 1;
 }
 
 static HOT void map_grow(Map *m) {
@@ -795,34 +887,8 @@ static HOT void map_grow(Map *m) {
     m->threshold = (new_cap * 4) / 5;
 }
 
-static HOT void map_put_buf(Map *m, const unsigned char *buf, uint32_t n, uint64_t h) {
-    if (__builtin_expect(m->len >= m->threshold, 0)) map_grow(m);
-
-    size_t idx = (size_t)h & m->mask;
-    for (;;) {
-        Entry *e = &m->slots[idx];
-        if (!e->key) {
-            unsigned char *dst = arena_alloc(m, (size_t)n + 1);
-            memcpy(dst, buf, n);
-            dst[n] = 0;
-            e->key = (char *)dst;
-            e->len = n;
-            e->cnt = 1;
-            e->h = h;
-            m->len++;
-            return;
-        }
-        if (e->h == h && e->len == n && memcmp(e->key, buf, n) == 0) {
-            e->cnt++;
-            return;
-        }
-        idx = (idx + 1) & m->mask;
-    }
-}
-
-/* Insert an existing owned key pointer (during merge). No arena alloc. */
-static HOT void map_put_owned(Map *m, char *key, uint32_t n, uint64_t h, uint32_t add_cnt) {
-    if (__builtin_expect(m->len >= m->threshold, 0)) map_grow(m);
+static HOT void map_put_span(Map *m, const unsigned char *key, uint32_t n, uint64_t h, uint32_t add_cnt) {
+    if (UNLIKELY(m->len >= m->threshold)) map_grow(m);
 
     size_t idx = (size_t)h & m->mask;
     for (;;) {
@@ -830,12 +896,12 @@ static HOT void map_put_owned(Map *m, char *key, uint32_t n, uint64_t h, uint32_
         if (!e->key) {
             e->key = key;
             e->len = n;
-            e->h = h;
             e->cnt = add_cnt;
+            e->h = h;
             m->len++;
             return;
         }
-        if (e->h == h && e->len == n && memcmp(e->key, key, n) == 0) {
+        if (e->h == h && e->len == n && key_eq_fold(e->key, key, n)) {
             e->cnt += add_cnt;
             return;
         }
@@ -849,8 +915,10 @@ static int cpu_allowed_count(void) {
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) == 0) {
 #ifdef CPU_COUNT
-        int n = CPU_COUNT(&set);
-        if (n > 0) return n;
+        {
+            int n = CPU_COUNT(&set);
+            if (n > 0) return n;
+        }
 #endif
         int n = 0;
         for (int i = 0; i < CPU_SETSIZE; i++) if (CPU_ISSET(i, &set)) n++;
@@ -898,15 +966,11 @@ static void *worker(void *arg) {
     Ctx *c = (Ctx *)arg;
     pin_thread(c->pin_cpu);
 
-    /* Heuristics: big-ish table to reduce grow; big arena to avoid exhaustion. */
+    /* Heuristic: big-ish table to reduce grow. */
     size_t chunk_len = (size_t)(c->end - c->start);
     size_t cap_hint = (chunk_len / 64) + (1u << 16);        /* toy heuristic */
-    size_t arena_cap = (chunk_len / 2) + (2u << 20);        /* plenty */
 
-    map_init(&c->map, cap_hint, arena_cap);
-
-    unsigned char *buf = (unsigned char *)malloc((size_t)c->maxw + 1);
-    if (!buf) die("malloc(buf)");
+    map_init(&c->map, cap_hint);
 
     const unsigned char *p = c->start;
     const unsigned char *end = c->end;
@@ -917,25 +981,25 @@ static void *worker(void *arg) {
         while (p < end && !is_alpha(*p)) p++;
         if (p >= end) break;
 
+        const unsigned char *word = p;
         uint64_t h = 0x9e3779b97f4a7c15ULL;
         uint32_t n = 0;
 
         while (p < end && is_alpha(*p)) {
             unsigned char ch = (unsigned char)(*p++ | 32u);
             if (n < c->maxw) {
-                buf[n++] = ch;
                 h = hstep(h, ch);
+                n++;
             }
         }
 
         if (n) {
-            map_put_buf(&c->map, buf, n, h);
+            map_put_span(&c->map, word, n, h, 1);
             total++;
         }
     }
 
     c->total_words = total;
-    free(buf);
     return NULL;
 }
 
@@ -1011,11 +1075,16 @@ int main(int argc, char **argv) {
 
         /* Boundary fix: if start is in middle of a word, skip to end of that word. */
         if (s > 0 && is_alpha(data[s - 1])) {
-            while (s < e && is_alpha(data[s])) s++;
+            while (s < fsize && is_alpha(data[s])) s++;
+        }
+        if (e < s) {
+            e = s;
         }
         /* Extend end forward to include a whole word (next chunk will skip). */
         if (i != threads - 1) {
-            while (e < fsize && is_alpha(data[e])) e++;
+            if (e > 0 && is_alpha(data[e - 1])) {
+                while (e < fsize && is_alpha(data[e])) e++;
+            }
         }
 
         ctx[i].start = data + s;
@@ -1041,16 +1110,16 @@ int main(int argc, char **argv) {
 
     Map g;
     memset(&g, 0, sizeof g);
-    /* global cap based on estimated uniques; global arena not used */
+    /* global cap based on estimated uniques */
     size_t gcap_hint = (total_uniques_est * 2) + (1u << 16);
-    map_init(&g, gcap_hint, (1u << 20)); /* arena unused but required by init */
+    map_init(&g, gcap_hint);
 
     for (int i = 0; i < threads; i++) {
         Map *m = &ctx[i].map;
         for (size_t j = 0; j < m->cap; j++) {
             Entry *e = &m->slots[j];
             if (!e->key) continue;
-            map_put_owned(&g, e->key, e->len, e->h, e->cnt);
+            map_put_span(&g, e->key, e->len, e->h, e->cnt);
         }
     }
 
@@ -1069,7 +1138,6 @@ EOF
 
 # -------------------------- Build variants ------------------------------------
 # Variant set: compile-time macro differences (important for embedded profiles)
-declare -a VARIANTS_ALL=(default heap tiny)
 declare -A VAR_DEFINES=(
   [default]="-DWC_OMIT_ASSERT"
   [heap]="-DWC_OMIT_ASSERT -DWC_STACK_BUFFER=0"
@@ -1078,7 +1146,8 @@ declare -A VAR_DEFINES=(
 
 split_csv() {
   local csv="$1"
-  local IFS=','; read -r -a _out <<< "$csv"
+  local IFS=','
+  read -r -a _out <<< "$csv"
   printf "%s\n" "${_out[@]}"
 }
 
@@ -1086,49 +1155,58 @@ build_binaries() {
   local bench_c="$1"
 
   # Conservative, performance-oriented defaults. Users can override via CFLAGS env.
-  local cflags="${CFLAGS:-"-O3 -DNDEBUG -pipe"}"
+  local cflags_src="${CFLAGS:--O3 -DNDEBUG -pipe}"
+  local -a cflags=()
+  split_flags "$cflags_src" cflags
   # -march=native is great for local perf work; keep it default unless user opted out via CFLAGS.
-  if [[ "${CFLAGS:-}" != *"-march="* && "${CFLAGS:-}" != *"-march "* ]]; then
-    cflags+=" -march=native"
+  if [[ "${CFLAGS:-}" != *"-march="* && "${CFLAGS:-}" != *"-march "* ]] && cc_supports_flag -march=native; then
+    cflags+=("-march=native")
   fi
 
-  note "Building benchmark binaries with: $CC $cflags"
+  note "Building benchmark binaries with: $(format_argv "$CC" "${cflags[@]}")"
   for v in "${VARIANTS[@]}"; do
     [[ -n "${VAR_DEFINES[$v]:-}" ]] || die "Unknown variant: $v"
     local out="$BIN_DIR/bench_${v}"
     local defs="${VAR_DEFINES[$v]}"
+    local -a defs_arr=()
+    split_flags "$defs" defs_arr
 
-    $CC $cflags $defs -I"$ROOT_DIR" \
+    "$CC" "${cflags[@]}" "${defs_arr[@]}" -I"$ROOT_DIR" \
       "$ROOT_DIR/wordcount.c" "$bench_c" \
       -o "$out" \
       || die "Build failed for variant '$v'"
 
     note "Built: $out (${v})"
   done
-  
-    # --- toy competitor (Linux-only) ---
-  if (( DO_TOY )); then
+
+  # --- toy competitor (Linux-only) ---
+  if ((DO_TOY)); then
     if [[ "$(uname -s)" == "Linux" ]]; then
       local toy_c
       toy_c="$(write_toy_competitor_c)"
 
-      # Aggressive but NOT arch-specific. Let users override via CFLAGS_TOY.
-      local toy_flags="${CFLAGS_TOY:-"-O3 -DNDEBUG -pipe"}"
+      # Aggressive defaults. Let users override via CFLAGS_TOY.
+      local toy_flags_src="${CFLAGS_TOY:--O3 -DNDEBUG -pipe}"
+      local -a toy_flags=()
+      split_flags "$toy_flags_src" toy_flags
+      if [[ "${CFLAGS_TOY:-}" != *"-march="* && "${CFLAGS_TOY:-}" != *"-march "* ]] && cc_supports_flag -march=native; then
+        toy_flags+=("-march=native")
+      fi
 
       # Opportunistic: LTO if supported
       if cc_supports_flag -flto; then
-        toy_flags+=" -flto"
+        toy_flags+=("-flto")
       fi
       # Opportunistic: reduce some linkage overhead if supported
       if cc_supports_flag -fno-plt; then
-        toy_flags+=" -fno-plt"
+        toy_flags+=("-fno-plt")
       fi
       if cc_supports_flag -fno-semantic-interposition; then
-        toy_flags+=" -fno-semantic-interposition"
+        toy_flags+=("-fno-semantic-interposition")
       fi
 
-      note "Building toy competitor with: $CC $toy_flags (no -march=native)"
-      "$CC" $toy_flags -pthread "$toy_c" -o "$BIN_DIR/toyfast" \
+      note "Building toy competitor with: $(format_argv "$CC" "${toy_flags[@]}" -pthread "$toy_c" -o "$BIN_DIR/toyfast")"
+      "$CC" "${toy_flags[@]}" -pthread "$toy_c" -o "$BIN_DIR/toyfast" \
         || die "Build failed for toyfast competitor"
       note "Built: $BIN_DIR/toyfast"
     else
@@ -1136,12 +1214,14 @@ build_binaries() {
     fi
   fi
 
-  if (( DO_CLI )); then
+  if ((DO_CLI)); then
     note "Building CLI binaries (wc_main.c)..."
     for v in "${VARIANTS[@]}"; do
       local out="$BIN_DIR/wc_cli_${v}"
       local defs="${VAR_DEFINES[$v]}"
-      $CC $cflags $defs -I"$ROOT_DIR" \
+      local -a defs_arr=()
+      split_flags "$defs" defs_arr
+      "$CC" "${cflags[@]}" "${defs_arr[@]}" -I"$ROOT_DIR" \
         "$ROOT_DIR/wordcount.c" "$ROOT_DIR/wc_main.c" \
         -o "$out" \
         || die "Build failed for CLI variant '$v'"
@@ -1159,7 +1239,7 @@ make_validation_blob() {
   fi
 
   if [[ -n "$PYTHON_BIN" ]]; then
-    "$PYTHON_BIN" - <<PY > "$f"
+    "$PYTHON_BIN" - << PY > "$f"
 import sys
 # Includes: mixed case, punctuation, digits, UTF-8 bytes, embedded NULs, edge separators
 b = bytearray()
@@ -1211,7 +1291,7 @@ run_validation() {
       die "Validation parse failed for variant '$v' (output malformed)"
     fi
 
-    if [[ "$a" != "$b" || "$a" != "$c" || "$a" != "$d" ]]; then
+    if ! [[ "$a" == "$b" && "$a" == "$c" && "$a" == "$d" ]]; then
       echo "variant=$v"
       echo "  scan         : $a"
       echo "  stream       : $b"
@@ -1248,6 +1328,7 @@ cmd_prefix() {
       warn "--nice requested but 'nice' not available; ignoring."
     fi
   fi
+  ((${#prefix[@]} == 0)) && return 0
   printf "%q " "${prefix[@]}"
 }
 
@@ -1257,8 +1338,7 @@ bench_one() {
   shift 2
   local tmpfile="$RESULTS_DIR/tmp_time.txt"
 
-  # shellcheck disable=SC2068
-  if $TIME_BIN -f "$TIME_FMT" -o "$tmpfile" -- "$@" >/dev/null 2>&1; then
+  if "$TIME_BIN" -f "$TIME_FMT" -o "$tmpfile" -- "$@" > /dev/null 2>&1; then
     local line
     line="$(cat "$tmpfile")"
     echo "$label,$run_id,$line" >> "$RAW_CSV"
@@ -1270,17 +1350,20 @@ bench_one() {
 shuffle_indices() {
   local n="$1"
   if have shuf; then
-    seq 0 $((n-1)) | shuf
+    seq 0 $((n - 1)) | shuf
   else
     # Fallback: no shuffle (still interleaves by run)
-    seq 0 $((n-1))
+    seq 0 $((n - 1))
   fi
 }
 
 maybe_perf_stat() {
-  (( PERF )) || return 0
+  ((PERF)) || return 0
   [[ "$(uname -s)" == "Linux" ]] || return 0
-  have perf || { warn "--perf requested but perf not found; skipping."; return 0; }
+  have perf || {
+    warn "--perf requested but perf not found; skipping."
+    return 0
+  }
 
   local label="$1"
   shift
@@ -1288,7 +1371,7 @@ maybe_perf_stat() {
 
   # Best-effort: perf permissions vary by distro.
   set +e
-  perf stat -d -- "$@" >/dev/null 2>"$out"
+  perf stat -d -- "$@" > /dev/null 2> "$out"
   local rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
@@ -1299,15 +1382,12 @@ maybe_perf_stat() {
 }
 
 summarize_results() {
-  local corpus_bytes="$1"
-  local baseline_label="$2"
-
   if [[ -z "$PYTHON_BIN" ]]; then
     warn "python not found; leaving raw CSV only: $RAW_CSV"
     return 0
   fi
 
-  "$PYTHON_BIN" - <<PY
+  "$PYTHON_BIN" - << PY
 import csv, json, math, os, statistics, sys
 from collections import defaultdict
 
@@ -1449,7 +1529,7 @@ mapfile -t MODES < <(split_csv "$MODES_CSV")
 build_binaries "$BENCH_C"
 
 # Optional validation
-if (( VALIDATE )); then
+if ((VALIDATE)); then
   run_validation
 fi
 
@@ -1493,12 +1573,12 @@ prime_page_cache "$CORPUS"
 declare -a JOB_LABELS=()
 declare -a JOB_CMDS=()
 
-prefix="$(cmd_prefix)"
+cmd_prefix_text="$(cmd_prefix)"
 
 for v in "${VARIANTS[@]}"; do
   for m in "${MODES[@]}"; do
     case "$m" in
-      scan|stream|scan_results|stream_results) ;;
+      scan | stream | scan_results | stream_results) ;;
       *) die "Unknown mode requested: $m" ;;
     esac
 
@@ -1508,10 +1588,10 @@ for v in "${VARIANTS[@]}"; do
 
     # bench_wc arguments
     args=("$bin" "$CORPUS" "--mode" "$m" "--chunk" "$CHUNK_BYTES" "--max-word" "$MAX_WORD")
-    if (( QUIET )); then args+=("--quiet"); fi
+    if ((QUIET)); then args+=("--quiet"); fi
 
     # Store as a command array serialized via printf %q for safe bash -c evaluation.
-    cmd="$prefix"
+    cmd="$cmd_prefix_text"
     for a in "${args[@]}"; do cmd+=$(printf "%q " "$a"); done
 
     JOB_LABELS+=("$label")
@@ -1519,27 +1599,27 @@ for v in "${VARIANTS[@]}"; do
   done
 done
 
-if (( DO_TOY )) && [[ "$(uname -s)" == "Linux" ]]; then
+if ((DO_TOY)) && [[ "$(uname -s)" == "Linux" ]]; then
   label="toyfast"
   bin="$BIN_DIR/toyfast"
   [[ -x "$bin" ]] || die "Missing toy competitor binary: $bin"
 
   args=("$bin" "$CORPUS" "--max-word" "$MAX_WORD")
-  if (( QUIET )); then args+=("--quiet"); fi
+  if ((QUIET)); then args+=("--quiet"); fi
 
-  cmd="$prefix"
+  cmd="$cmd_prefix_text"
   for a in "${args[@]}"; do cmd+=$(printf "%q " "$a"); done
 
   JOB_LABELS+=("$label")
   JOB_CMDS+=("$cmd")
 fi
 
-if (( DO_CLI )); then
+if ((DO_CLI)); then
   for v in "${VARIANTS[@]}"; do
     label="cli:${v}"
     bin="$BIN_DIR/wc_cli_${v}"
     [[ -x "$bin" ]] || die "Missing CLI binary: $bin"
-    cmd="$prefix$(printf "%q " "$bin" "$CORPUS")"
+    cmd="$cmd_prefix_text$(printf "%q " "$bin" "$CORPUS")"
     JOB_LABELS+=("$label")
     JOB_CMDS+=("$cmd")
   done
@@ -1549,25 +1629,28 @@ fi
 BASELINE="default:scan"
 baseline_found=0
 for lbl in "${JOB_LABELS[@]}"; do
-  if [[ "$lbl" == "$BASELINE" ]]; then baseline_found=1; break; fi
+  if [[ "$lbl" == "$BASELINE" ]]; then
+    baseline_found=1
+    break
+  fi
 done
-if (( baseline_found == 0 )); then
+if ((baseline_found == 0)); then
   BASELINE="${JOB_LABELS[0]}"
 fi
 note "Baseline: $BASELINE"
 
 # Warmup cycles (interleaved)
 note "Warmup cycles: $WARMUP"
-for ((w=1; w<=WARMUP; w++)); do
-  for ((i=0; i<${#JOB_LABELS[@]}; i++)); do
+for ((w = 1; w <= WARMUP; w++)); do
+  for ((i = 0; i < ${#JOB_LABELS[@]}; i++)); do
     # shellcheck disable=SC2090
-    bash -c "${JOB_CMDS[$i]}" >/dev/null 2>&1 || die "Warmup failed: ${JOB_LABELS[$i]}"
+    bash -c "${JOB_CMDS[$i]}" > /dev/null 2>&1 || die "Warmup failed: ${JOB_LABELS[$i]}"
   done
 done
 
 # Measured runs (interleaved + shuffled per run)
 note "Measured runs: $RUNS (interleaved order; per-run shuffle when available)"
-for ((r=1; r<=RUNS; r++)); do
+for ((r = 1; r <= RUNS; r++)); do
   note "Run $r/$RUNS"
   mapfile -t order < <(shuffle_indices "${#JOB_LABELS[@]}")
   for idx in "${order[@]}"; do
@@ -1581,9 +1664,9 @@ for ((r=1; r<=RUNS; r++)); do
 done
 
 # Optional perf stat: run once per job (best-effort)
-if (( PERF )); then
+if ((PERF)); then
   note "perf stat (best-effort; may be restricted by kernel settings)..."
-  for ((i=0; i<${#JOB_LABELS[@]}; i++)); do
+  for ((i = 0; i < ${#JOB_LABELS[@]}; i++)); do
     label="${JOB_LABELS[$i]}"
     cmd="${JOB_CMDS[$i]}"
     # Run without --quiet so perf isn't timing an empty process? (still fine either way)
@@ -1595,7 +1678,7 @@ fi
 export RAW_CSV SUMMARY_JSON
 export CORPUS_BYTES="$CORPUS_BYTES"
 export BASELINE="$BASELINE"
-summarize_results "$CORPUS_BYTES" "$BASELINE"
+summarize_results
 
 note "Done."
 note "Raw:    $RAW_CSV"
