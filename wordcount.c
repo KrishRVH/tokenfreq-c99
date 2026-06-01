@@ -300,7 +300,7 @@ typedef union {
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define WC_ALIGNOF(T) _Alignof(T)
-#elif defined(__GNUC__) || defined(__clang__)
+#elif defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)
 #define WC_ALIGNOF(T) __alignof__(T)
 #else
 #define WC_ALIGNOF(T)   \
@@ -314,6 +314,20 @@ typedef union {
 
 #define WC_ALIGN WC_ALIGNOF(wc_internal_align)
 WC_STATIC_ASSERT(WC_ALIGN >= 1u, wc_align_must_be_positive);
+
+#if defined(_MSC_VER)
+#define WC_FLEX_ARRAY 1
+#else
+#define WC_FLEX_ARRAY
+#endif
+
+#if WC_BOOL(WC_HAVE_UINTPTR)
+#if defined(UINTPTR_MAX) && defined(SIZE_MAX) && (UINTPTR_MAX < SIZE_MAX)
+#define WC_UINTPTR_NARROWER_THAN_SIZE 1
+#else
+#define WC_UINTPTR_NARROWER_THAN_SIZE 0
+#endif
+#endif
 
 /*
 ** Dummy use of wc_internal_align members to satisfy static analyzers
@@ -413,10 +427,11 @@ static int wc_ranges_overlap(
     *overlap = 0;
     if (asz == 0 || bsz == 0)
         return 1;
-    if (sizeof(uintptr_t) < sizeof(size_t) &&
-        (asz > (size_t)UINTPTR_MAX || bsz > (size_t)UINTPTR_MAX)) {
+#if WC_UINTPTR_NARROWER_THAN_SIZE
+    if (asz > (size_t)UINTPTR_MAX || bsz > (size_t)UINTPTR_MAX) {
         return 0;
     }
+#endif
 
     ab = (uintptr_t)a;
     bb = (uintptr_t)b;
@@ -439,7 +454,7 @@ struct Block {
     Block *next;
     char *cur;
     char *end;
-    char buf[];
+    char buf[WC_FLEX_ARRAY];
 };
 
 typedef struct {
@@ -501,7 +516,7 @@ struct wc_stream {
     int owns_self; /* 1 if allocated by library */
     char *buf;
 #if !WC_STREAM_REUSE_SCANBUF
-    char storage[]; /* cap bytes + 1 NUL (allocated) */
+    char storage[WC_FLEX_ARRAY]; /* cap bytes + 1 NUL (allocated) */
 #endif
 };
 
