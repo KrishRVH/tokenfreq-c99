@@ -13,3 +13,4 @@ wordcount_c
 
 # IDE
 .idea/
+.gstack/

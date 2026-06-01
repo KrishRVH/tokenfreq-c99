@@ -325,6 +325,8 @@ if(BUILD_TESTING)
   add_library(wordcount_lib_fault STATIC wordcount.c)
   target_sources(wordcount_lib_fault PRIVATE wc_fault_alloc.c)
   target_compile_definitions(wordcount_lib_fault PUBLIC
+    WC_MIN_BLOCK_SZ=1
+    WC_DEFAULT_BLOCK_SZ=1
     WC_MALLOC=wc_fault_malloc
     WC_FREE=wc_fault_free
   )
@@ -342,6 +344,8 @@ if(BUILD_TESTING)
   add_library(wordcount_lib_fault_heap STATIC wordcount.c)
   target_sources(wordcount_lib_fault_heap PRIVATE wc_fault_alloc.c)
   target_compile_definitions(wordcount_lib_fault_heap PUBLIC
+    WC_MIN_BLOCK_SZ=1
+    WC_DEFAULT_BLOCK_SZ=1
     WC_STACK_BUFFER=0
     WC_MALLOC=wc_fault_malloc
     WC_FREE=wc_fault_free
@@ -378,6 +382,7 @@ if(BUILD_TESTING)
   endfunction()
 
   wc_add_compile_only(wc_compile_static_init tests/compile_static_init.c)
+  wc_add_compile_only(wc_compile_msvc_sal tests/compile_msvc_sal.c)
   wc_add_compile_only(wc_compile_nouintptr wordcount.c)
   target_compile_definitions(wc_compile_nouintptr PRIVATE
     WC_HAVE_UINTPTR=0
@@ -451,6 +456,7 @@ if(BUILD_TESTING)
 
   add_custom_target(wc_compile_checks ALL)
   add_dependencies(wc_compile_checks wc_compile_static_init)
+  add_dependencies(wc_compile_checks wc_compile_msvc_sal)
   add_dependencies(wc_compile_checks wc_compile_nouintptr wc_compile_force_hash
                    wc_compile_custom_uintptr wc_compile_auto_uintptr
                    wc_compile_noheap_libclight

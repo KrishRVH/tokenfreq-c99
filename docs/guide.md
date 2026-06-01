@@ -39,8 +39,10 @@ wc_stream_finish(s); /* flush trailing token */
 wc_stream_close(s);
 ```
 
-- `wc_stream_finish` is idempotent; after it runs, `wc_stream_scan_ex` returns
-  the same code as `wc_stream_finish` with `consumed_out` left at 0.
+- If `wc_stream_finish` returns `WC_NOMEM`, the trailing word remains buffered
+  and the stream is not finished; retry after resolving the resource condition.
+  Other finish return codes are terminal and idempotent: after they run,
+  `wc_stream_scan_ex` returns the same code with `consumed_out` left at 0.
 - `wc_stream_close` does not flush a trailing word. Call `wc_stream_finish`
   before closing when the final token should be counted.
 - If the parent `wc` is closed first, open streams are detached: later

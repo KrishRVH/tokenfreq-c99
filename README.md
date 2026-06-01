@@ -617,9 +617,13 @@ that word, and leaves the stream usable for forward progress. `WC_ERROR` from
 invalid arguments, detached streams, or oversized chunks is fatal/no-progress.
 If the parent `wc` is closed first, open streams are detached: later scan/finish
 calls return `WC_ERROR`, and `wc_stream_close` remains safe. `wc_stream_finish`
-is idempotent and must be called before close when a trailing word should be
-counted. `wc_stream_close` releases the stream but does not flush that trailing
-word.
+must be called before close when a trailing word should be counted. If
+`wc_stream_finish` returns `WC_NOMEM`, the trailing word remains buffered and the
+stream is not finished, so callers may retry after resolving the resource
+condition.
+Other finish return codes are recorded and returned idempotently by later
+finish/scan calls. `wc_stream_close` releases the stream but does not flush that
+trailing word.
 
 ### Zero-Allocation Iterator API
 
@@ -810,6 +814,12 @@ Tiny RAM profile:
 
 * `-DWC_STACK_BUFFER=0`
 * `-DWC_MAX_WORD=16`
+
+This profile reduces stack and arena pressure; it is not a promise that the
+current design fits every MCU. The handle, hash slots, arena block headers, scan
+buffer, and required 32-bit hash fields still consume static storage. Validate
+the final compiler/linker map for the target, especially for sub-100-byte RAM
+parts.
 
 ### One-shot Build & Quality Script
 

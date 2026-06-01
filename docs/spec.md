@@ -99,12 +99,14 @@ Static-buffer contracts:
 
 - `wc_stream_scan_ex` matches `wc_scan` tokenization, normalization, and
   truncation across chunk boundaries.
-- `wc_stream_finish` flushes the trailing in-progress word, records the terminal
-  status, and is idempotent.
+- `wc_stream_finish` flushes the trailing in-progress word. On `WC_NOMEM`, that
+  word remains buffered and the stream is not finished, so callers may retry.
+  Other return codes are recorded as terminal status and returned
+  idempotently.
 - `wc_stream_close` does not flush a trailing word; call `wc_stream_finish`
   first when the trailing word should count.
-- After `wc_stream_finish`, `wc_stream_scan_ex` returns the saved finish status
-  and leaves `consumed_out` at `0`.
+- After a terminal `wc_stream_finish` result, `wc_stream_scan_ex` returns the
+  saved finish status and leaves `consumed_out` at `0`.
 - If insertion of a buffered word fails while `wc_stream_scan_ex` is scanning a
   separator, that word is discarded, the separator is consumed, and the stream
   remains valid for forward progress. `WC_ERROR` from invalid arguments,
@@ -176,3 +178,5 @@ Conventions:
   -DWC_STDC_HOSTED=0 -DWC_USE_LIBC_STRING=0 -DWC_USE_LIBC_QSORT=0
   -DWC_HAVE_ERRNO=0 -DWC_OMIT_ASSERT=1` with caller-supplied static storage.
 - Tiny RAM: `-DWC_STACK_BUFFER=0` with a reduced `WC_MAX_WORD` if desired.
+  This reduces stack and arena pressure but does not imply suitability for
+  sub-100-byte RAM parts; validate the target compiler/linker map.

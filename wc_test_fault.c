@@ -181,6 +181,55 @@ static int run_fault_results_topn_stream(int max_fail)
     return 0;
 }
 
+static int test_stream_finish_nomem_retry(void)
+{
+    wc_limits lim = WC_LIMITS_INIT();
+    wc *w = NULL;
+    wc_stream *s = NULL;
+    int rc = WC_OK;
+    int ok = 0;
+
+    lim.init_cap = 16;
+    lim.block_size = 1;
+
+    w = wc_open_ex(4, &lim, &rc);
+    if (!w || rc != WC_OK)
+        goto done;
+    if (wc_add(w, "aaaa") != WC_OK)
+        goto done;
+
+    s = wc_stream_open(w, &rc);
+    if (!s || rc != WC_OK)
+        goto done;
+    if (wc_stream_scan_ex(s, "bbbb", 4, NULL) != WC_OK)
+        goto done;
+
+    fault_arm(1);
+    rc = wc_stream_finish(s);
+    if (rc != WC_NOMEM)
+        goto done;
+    if (wc_total(w) != 1 || wc_unique(w) != 1)
+        goto done;
+
+    rc = wc_stream_finish(s);
+    if (rc != WC_OK)
+        goto done;
+    if (wc_total(w) != 2 || wc_unique(w) != 2)
+        goto done;
+    if (!invariant_cursor_sum_matches_total(w))
+        goto done;
+
+    ok = 1;
+
+done:
+    fault_reset();
+    if (s)
+        wc_stream_close(s);
+    if (w)
+        wc_close(w);
+    return ok ? 0 : 1;
+}
+
 static int test_results_free_null_does_not_call_custom_free(void)
 {
     int before = fault_null_free_count();
@@ -203,6 +252,8 @@ int main(void)
     if (run_fault_scan(max_fail))
         return 1;
     if (run_fault_results_topn_stream(max_fail))
+        return 1;
+    if (test_stream_finish_nomem_retry())
         return 1;
 
     printf("\n=== fault tests passed ===\n\n");

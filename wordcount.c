@@ -2692,7 +2692,13 @@ wc_stream *wc_stream_open(wc *w, int *err_out)
 #endif /* !WC_NO_HEAP */
 }
 
-static int wc_stream_flush_word(wc_stream *s)
+static void wc_stream_clear_word(wc_stream *s)
+{
+    s->len = 0;
+    s->buf[0] = '\0';
+}
+
+static int wc_stream_flush_word(wc_stream *s, int discard_on_nomem)
 {
     int trc;
     if (!s || !wc_ready(s->w))
@@ -2704,14 +2710,17 @@ static int wc_stream_flush_word(wc_stream *s)
         wc_hash_t h = wc_hash_bytes(s->buf, s->len, s->w->seed);
         trc = tab_insert(s->w, s->buf, s->len, h);
     }
-    /* Always reset word state after a flush attempt (forward progress). */
-    s->len = 0;
-    s->buf[0] = '\0';
 
-    if (trc == 0)
+    if (trc == 0) {
+        wc_stream_clear_word(s);
         return WC_OK;
-    if (trc == -2)
+    }
+    if (trc == -2) {
+        wc_stream_clear_word(s);
         return WC_ERROR;
+    }
+    if (discard_on_nomem)
+        wc_stream_clear_word(s);
     return WC_NOMEM;
 }
 
@@ -2756,7 +2765,7 @@ int wc_stream_scan_ex(wc_stream *s,
             p++;
         } else {
             if (s->len > 0) {
-                int rc = wc_stream_flush_word(s);
+                int rc = wc_stream_flush_word(s, 1);
                 if (rc != WC_OK) {
                     /* consume the separator for forward progress */
                     p++;
@@ -2783,9 +2792,11 @@ int wc_stream_finish(wc_stream *s)
     if (s->finished)
         return s->finish_rc;
 
-    rc = wc_stream_flush_word(s);
-    s->finished = 1;
-    s->finish_rc = rc;
+    rc = wc_stream_flush_word(s, 0);
+    if (rc != WC_NOMEM) {
+        s->finished = 1;
+        s->finish_rc = rc;
+    }
     return rc;
 }
 

@@ -677,8 +677,8 @@ typedef struct wc_stats {
 ** impossible to satisfy (e.g., max_bytes/static_size too small for
 ** even minimal internal structures). err_out, if provided, is always set.
 */
-WC_API wc *
-wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out) WC_WUR;
+WC_API WC_WUR wc *
+wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out);
 /*
 ** Create a new word counter with default limits (no explicit memory
 ** cap, platform-tuned defaults for table and arena sizes).
@@ -844,8 +844,8 @@ WC_API wc_stream *wc_stream_open(wc *w, int *err_out);
 /*
 ** Scan a chunk. consumed_out (optional) receives the number of bytes
 ** consumed before returning. On WC_OK before finish, consumed_out == len.
-** After wc_stream_finish(), wc_stream_scan_ex() returns the saved finish status
-** and leaves consumed_out at 0.
+** After a terminal wc_stream_finish() result, wc_stream_scan_ex() returns the
+** saved finish status and leaves consumed_out at 0.
 ** If insertion of a buffered word fails while scanning a separator, the stream
 ** remains valid; that word is discarded and the separator is consumed so callers
 ** can continue with remaining bytes if desired. WC_ERROR from invalid arguments,
@@ -856,9 +856,13 @@ WC_API WC_WUR int wc_stream_scan_ex(wc_stream *s,
                                     size_t len,
                                     size_t *consumed_out);
 
-/* Finish stream: inserts any trailing in-progress word (idempotent). Closing a
-   stream does not finish it; call wc_stream_finish first when the trailing word
-   should be counted. */
+/*
+** Finish stream: inserts any trailing in-progress word. On WC_NOMEM, the
+** trailing word remains buffered and the stream is not finished, so callers may
+** retry. Other return codes finish the stream and are idempotently returned by
+** later finish/scan calls. Closing a stream does not finish it; call
+** wc_stream_finish first when the trailing word should be counted.
+*/
 WC_API WC_WUR int wc_stream_finish(wc_stream *s);
 
 WC_API void wc_stream_close(wc_stream *s);
