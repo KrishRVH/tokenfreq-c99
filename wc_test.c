@@ -1845,6 +1845,63 @@ static int test_arena_grows_blocks_dynamic(void)
     return 0;
 }
 
+static int test_reserve_dynamic_counts_tail_capacity(void)
+{
+    wc_limits lim = WC_LIMITS_INIT();
+    wc_stats st;
+    wc *probe;
+    wc *w;
+    size_t tight_limit;
+    int rc = WC_OK;
+
+    TEST("reserve: dynamic max_bytes counts current arena capacity");
+
+    lim.init_cap = 16;
+    lim.block_size = 256;
+
+    probe = wc_open_ex(4, &lim, &rc);
+    ASSERT(probe != NULL);
+    ASSERT(rc == WC_OK);
+    ASSERT(wc_get_stats(probe, &st) == WC_OK);
+    ASSERT(st.bytes_used > 0);
+    tight_limit = st.bytes_used;
+    wc_close(probe);
+
+    lim.max_bytes = tight_limit;
+
+    w = wc_open_ex(4, &lim, &rc);
+    ASSERT(w != NULL);
+    ASSERT(rc == WC_OK);
+    ASSERT(wc_get_stats(w, &st) == WC_OK);
+    ASSERT(st.static_mode == 0);
+    ASSERT(st.bytes_limit == tight_limit);
+    ASSERT(st.bytes_used == tight_limit);
+
+    ASSERT(wc_reserve(w, 0, 1) == WC_OK);
+    ASSERT(wc_add(w, "abc") == WC_OK);
+    ASSERT(wc_total(w) == 1);
+    ASSERT(wc_unique(w) == 1);
+
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
+static int test_reserve_dynamic_rejects_impossible_bytes(void)
+{
+    wc *w;
+
+    TEST("reserve: dynamic rejects impossible arena bytes");
+
+    w = wc_open(0);
+    ASSERT(w != NULL);
+    ASSERT(wc_reserve(w, 0, WC_SIZE_MAX) == WC_NOMEM);
+
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
 static int test_reserve_static_respects_max_bytes(void)
 {
     WC_TEST_STATIC_BUF(pool, 4096);
@@ -2385,6 +2442,8 @@ int main(void)
     test_duplicates_survive_exhaustion_max_bytes();
     test_strict_max_bytes_blocks_peaks();
     test_arena_grows_blocks_dynamic();
+    test_reserve_dynamic_counts_tail_capacity();
+    test_reserve_dynamic_rejects_impossible_bytes();
     test_reserve_static_respects_max_bytes();
     test_reserve_static_checks_arena_capacity();
     test_results_and_stream_not_counted_in_stats();

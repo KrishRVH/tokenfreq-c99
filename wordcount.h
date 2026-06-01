@@ -414,6 +414,8 @@ extern "C" {
 **   Requirements (enforced by compile-time asserts in wordcount.c):
 **     - WC_U32_T must be an unsigned integer type of exactly 32 bits.
 **     - If WC_HASH_STRONG=1, WC_U64_T must be an unsigned integer type of exactly 64 bits.
+**     - Custom types must not require alignment stricter than void*, size_t,
+**       unsigned long, and long double.
 **   Defaults use <stdint.h> uint32_t/uint64_t.
 **   Targets without usable <stdint.h> should define WC_U32_T, WC_PTRDIFF_MAX,
 **   and WC_HAVE_UINTPTR=0 explicitly.
@@ -498,11 +500,17 @@ typedef struct wc wc;
 **
 **       - The buffer must be suitably aligned; on hosted implementations,
 **         alignment at least as strict as that of void*, size_t, unsigned long,
-**         and long double is sufficient. When uintptr_t is available,
-**         misaligned buffers are rejected at runtime. Without uintptr_t,
-**         static-buffer mode is rejected unless
+**         and long double is sufficient for supported configurations. Custom
+**         WC_U32_T / WC_U64_T types with stricter alignment are rejected at
+**         compile time. When uintptr_t is available, misaligned buffers are
+**         rejected at runtime. Without uintptr_t, static-buffer mode is rejected
+**         unless
 **         WC_TRUST_STATIC_BUFFER_ALIGNMENT=1; in that trust mode, alignment of
 **         static_buf is a caller precondition and cannot be verified at runtime.
+**
+**       - Static-buffer mode uses one arena block for word storage. With an
+**         explicit block_size, that value is the static word-storage capacity,
+**         not a request to allocate more blocks from unused static storage.
 **
 **       - The buffer must remain valid and must not be shared with
 **         another wc instance for its entire lifetime.
@@ -527,6 +535,12 @@ typedef struct wc wc;
 ** Portable helper to declare a suitably-aligned static buffer for
 ** wc_limits.static_buf in C99.
 **
+** WC_STATIC_BUFFER provides alignment only. Static-buffer mode also assumes
+** the target implementation permits suitably aligned caller-provided byte
+** storage to back typed internal objects. This is the common embedded/hosted C
+** implementation model, but strictly conforming ISO C does not define every
+** effective-type detail for arbitrary unsigned char backing arrays.
+**
 ** Example:
 **   WC_STATIC_BUFFER(pool, 2048);
 **   wc_limits lim = WC_LIMITS_INIT();
@@ -534,14 +548,28 @@ typedef struct wc wc;
 **   lim.static_size = sizeof pool.buf;
 */
 #ifndef WC_STATIC_BUFFER
+#if (WC_HASH_STRONG + 0)
 #define WC_STATIC_BUFFER(name, size_) \
     union {                           \
         void *p;                      \
         size_t sz;                    \
         unsigned long ul;             \
         long double ld;               \
+        WC_U32_T u32;                 \
+        WC_U64_T u64;                 \
         unsigned char buf[(size_)];   \
     } name
+#else
+#define WC_STATIC_BUFFER(name, size_) \
+    union {                           \
+        void *p;                      \
+        size_t sz;                    \
+        unsigned long ul;             \
+        long double ld;               \
+        WC_U32_T u32;                 \
+        unsigned char buf[(size_)];   \
+    } name
+#endif
 #endif
 
 typedef struct wc_limits {

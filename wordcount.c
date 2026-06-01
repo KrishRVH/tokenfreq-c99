@@ -255,12 +255,16 @@ WC_STATIC_ASSERT(WC_SIZE_MAX == (size_t)-1, wc_size_max_must_match_size_t);
 WC_STATIC_ASSERT(sizeof(wc_u32) * CHAR_BIT == 32, wc_u32_must_be_32_bits);
 WC_STATIC_ASSERT(((wc_u32)0 - (wc_u32)1) > (wc_u32)0, wc_u32_must_be_unsigned);
 
-WC_STATIC_ASSERT(WC_MAX_WORD >= 4u, wc_max_word_must_be_at_least_4);
-WC_STATIC_ASSERT(WC_MIN_INIT_CAP >= 1u, wc_min_init_cap_must_be_positive);
-WC_STATIC_ASSERT(WC_MIN_BLOCK_SZ >= 1u, wc_min_block_sz_must_be_positive);
-WC_STATIC_ASSERT(WC_DEFAULT_INIT_CAP >= WC_MIN_INIT_CAP,
+WC_STATIC_ASSERT((WC_MAX_WORD) >= 4, wc_max_word_must_be_at_least_4);
+WC_STATIC_ASSERT((WC_MIN_INIT_CAP) >= 1, wc_min_init_cap_must_be_positive);
+WC_STATIC_ASSERT((WC_MIN_BLOCK_SZ) >= 1, wc_min_block_sz_must_be_positive);
+WC_STATIC_ASSERT((WC_DEFAULT_INIT_CAP) >= 1,
+                 wc_default_init_cap_must_be_positive);
+WC_STATIC_ASSERT((WC_DEFAULT_BLOCK_SZ) >= 1,
+                 wc_default_block_sz_must_be_positive);
+WC_STATIC_ASSERT((WC_DEFAULT_INIT_CAP) >= (WC_MIN_INIT_CAP),
                  wc_default_init_cap_too_small);
-WC_STATIC_ASSERT(WC_DEFAULT_BLOCK_SZ >= WC_MIN_BLOCK_SZ,
+WC_STATIC_ASSERT((WC_DEFAULT_BLOCK_SZ) >= (WC_MIN_BLOCK_SZ),
                  wc_default_block_sz_too_small);
 
 #if defined(WC_HAVE_UINTPTR)
@@ -275,9 +279,10 @@ WC_STATIC_ASSERT(WC_DEFAULT_BLOCK_SZ >= WC_MIN_BLOCK_SZ,
 ** Internal alignment type.
 **
 ** Any object allocated from the internal bump allocator will be
-** aligned to WC_ALIGN, which is based on this union. Including all
-** types we allocate (void*, size_t, unsigned long, long double) ensures
-** correct alignment on conforming ABIs.
+** aligned to WC_ALIGN, which is based on this union. It must cover the
+** scalar alignment requirements that malloc is required to satisfy in
+** supported builds. Caller-configured hash integer types must not require
+** stricter alignment than this baseline.
 */
 typedef union {
     void *p;
@@ -304,6 +309,10 @@ typedef union {
 
 #define WC_ALIGN WC_ALIGNOF(wc_internal_align)
 WC_STATIC_ASSERT(WC_ALIGN >= 1u, wc_align_must_be_positive);
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(wc_u32), wc_u32_alignment_too_strict);
+#if WC_INTERNAL_BOOL(WC_HASH_STRONG)
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(wc_u64), wc_u64_alignment_too_strict);
+#endif
 
 #if defined(_MSC_VER)
 #define WC_FLEX_ARRAY 1
@@ -527,6 +536,9 @@ struct wc {
 #endif
     wc_stream *streams;
 };
+
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(Slot), wc_align_must_cover_slot);
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(struct wc), wc_align_must_cover_wc);
 
 static void wc_stream_mark_detached(wc_stream *s)
 {
@@ -1008,6 +1020,55 @@ static void arena_free(wc *w)
 
     w->arena.head = w->arena.tail = NULL;
     w->arena.blocks = 0;
+}
+
+static int arena_tail_available(const Arena *a, size_t *out)
+{
+    const size_t align = WC_ALIGN;
+    const char *cur;
+    size_t pad;
+    size_t avail;
+
+    if (!a || !a->tail || !out)
+        return 0;
+
+    cur = a->tail->cur;
+#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
+    {
+        const uintptr_t cur_addr = (uintptr_t)cur;
+        pad = (size_t)((align - (cur_addr % align)) % align);
+    }
+#else
+    {
+        size_t offset = (size_t)(cur - a->tail->buf);
+        if (add_overflows(offsetof(Block, buf), offset))
+            return 0;
+        offset += offsetof(Block, buf);
+        pad = (align - (offset % align)) % align;
+    }
+#endif
+
+    avail = (size_t)(a->tail->end - a->tail->cur);
+    *out = (avail < pad) ? 0u : (avail - pad);
+    return 1;
+}
+
+static int
+arena_new_block_allocation_size(const Arena *a, size_t sz, size_t *out)
+{
+    size_t need;
+    size_t cap;
+
+    if (!a || !out)
+        return 0;
+    if (add_overflows(sz, WC_ALIGN))
+        return 0;
+    need = sz + WC_ALIGN;
+    cap = need > a->block_sz ? need : a->block_sz;
+    if (add_overflows(sizeof(Block), cap))
+        return 0;
+    *out = sizeof(Block) + cap;
+    return 1;
 }
 
 /*
@@ -2479,38 +2540,27 @@ int wc_reserve(
     }
 
     if (expected_bytes > 0) {
+        size_t tail_avail;
+
+        if (!arena_tail_available(&w->arena, &tail_avail))
+            return WC_ERROR;
+        if (expected_bytes <= tail_avail)
+            return WC_OK;
+
         if (w->alloc.static_mode) {
-            size_t avail;
-            size_t pad;
-            const char *cur;
+            return WC_NOMEM;
+        } else {
+            size_t alloc;
 
-            if (!w->arena.tail)
-                return WC_ERROR;
-
-            cur = w->arena.tail->cur;
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
-            {
-                const uintptr_t cur_addr = (uintptr_t)cur;
-                pad = (size_t)((WC_ALIGN - (cur_addr % WC_ALIGN)) % WC_ALIGN);
-            }
-#else
-            {
-                size_t offset = (size_t)(cur - w->arena.tail->buf);
-                if (add_overflows(offsetof(Block, buf), offset))
+            if (!arena_new_block_allocation_size(
+                        &w->arena, expected_bytes, &alloc))
+                return WC_NOMEM;
+            if (w->alloc.bytes_limit) {
+                if (w->alloc.bytes_used > w->alloc.bytes_limit)
                     return WC_ERROR;
-                offset += offsetof(Block, buf);
-                pad = (WC_ALIGN - (offset % WC_ALIGN)) % WC_ALIGN;
+                if (alloc > w->alloc.bytes_limit - w->alloc.bytes_used)
+                    return WC_NOMEM;
             }
-#endif
-
-            avail = (size_t)(w->arena.tail->end - w->arena.tail->cur);
-            if (avail < pad || expected_bytes > avail - pad)
-                return WC_NOMEM;
-        } else if (w->alloc.bytes_limit) {
-            if (w->alloc.bytes_used > w->alloc.bytes_limit)
-                return WC_ERROR;
-            if (expected_bytes > w->alloc.bytes_limit - w->alloc.bytes_used)
-                return WC_NOMEM;
         }
     }
 

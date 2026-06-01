@@ -66,10 +66,16 @@ Preconditions:
   unavailable, set `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` only when the caller
   guarantees alignment for static buffers. In that trust mode, misalignment is
   not reliably rejected at runtime.
+- Static-buffer mode assumes the target permits suitably aligned byte storage
+  to back typed internal objects. This is supported by common hosted and
+  embedded C implementations, but strict ISO C does not fully define the
+  effective-type details for arbitrary `unsigned char` backing arrays.
 - In `WC_NO_HEAP=1` builds, the handle is placed at the start of `static_buf`;
   its aligned footprint counts against `static_size`.
 - With `block_size=0`, static-buffer mode sizes the single arena block to use
   the remaining effective static budget after fixed internal allocations.
+- With an explicit `block_size`, that value is the capacity of the single word
+  arena block; unused static storage is not turned into additional arena blocks.
 
 ## Budgets and Strict Mode
 
@@ -89,7 +95,8 @@ Preconditions:
 - Heapless: `-DWC_NO_HEAP=1` plus a static buffer for both handle and storage.
 - Custom integer types: define `WC_U32_T` / `WC_U64_T`; also define
   `WC_PTRDIFF_MAX` and `WC_HAVE_UINTPTR=0` if `<stdint.h>`/`PTRDIFF_MAX` or
-  `uintptr_t` is unavailable.
+  `uintptr_t` is unavailable. Custom hash integer types must not require
+  stricter alignment than `void*`, `size_t`, `unsigned long`, and `long double`.
 
 ## Error Handling Patterns
 

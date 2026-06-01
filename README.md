@@ -217,7 +217,9 @@ for each byte c:
 The public function signatures use only standard types (`size_t`, `int`, pointers).
 The public header accepts `WC_U32_T` / `WC_U64_T` build macros so internal
 hashing integer widths stay explicit and portable without leaking those types
-into API signatures.
+into API signatures. Custom hash integer types must not require stricter
+alignment than `void*`, `size_t`, `unsigned long`, and `long double`; stricter
+types are rejected at compile time.
 
 ### Arena Allocator
 
@@ -233,8 +235,8 @@ Word strings are stored in an arena:
 
   * Bump-pointer within the current block
   * Alignment to the library's internal allocator requirement, derived from the
-    union of internal types used by the allocator. Use `WC_STATIC_BUFFER` for
-    portable static-buffer alignment.
+    union of internal scalar alignment requirements, including configured hash
+    integer types. Use `WC_STATIC_BUFFER` for portable static-buffer alignment.
   * Zero-initialized memory for safety and deterministic behavior
 
 In static-buffer mode:
@@ -243,7 +245,8 @@ In static-buffer mode:
 * With the default `block_size=0`, `wc_open_ex` sizes that block to use the
   remaining effective static budget after the table, handle, and scan buffer.
   Explicit static `block_size` values are honored when the dry run can satisfy
-  the requested layout.
+  the requested layout; the explicit value is the word-storage capacity of that
+  single static arena block.
 * When the arena fills up, insertions of *new unique words* fail with `WC_NOMEM`
   while leaving the structure in a valid, queryable state.
 
@@ -343,6 +346,12 @@ Static buffer alignment:
   alignment checks and makes correct alignment of `static_buf` a caller
   precondition.
 - There is intentionally no “size_t-based” runtime fallback, because pointer-to-integer conversions are only reliably supported via `uintptr_t`.
+- `WC_STATIC_BUFFER` provides the required alignment for supported
+  configurations. Static-buffer mode also assumes the implementation permits
+  suitably aligned caller-provided byte storage to back typed internal objects.
+  GCC, Clang, MSVC, and typical embedded C toolchains support this model; strict
+  ISO C does not fully define the effective-type details for arbitrary
+  `unsigned char` backing arrays.
 
 ### Invariants and Consistency Guarantees
 
@@ -478,6 +487,8 @@ Per-instance memory and sizing limits:
   * Arena block size in bytes for the first block.
   * `0` = default, floored by `WC_MIN_BLOCK_SZ`; in static-buffer mode the
     default is expanded to use the remaining effective static budget.
+  * In static-buffer mode, an explicit value is the capacity of the single word
+    arena block; unused static storage is not turned into additional blocks.
 * `static_buf`, `static_size`:
 
   * Optional caller-supplied region used for all **internal** allocations.
@@ -807,6 +818,9 @@ Freestanding / exotic toolchains:
 * `-DWC_OMIT_ASSERT=1`
 * `-DWC_U32_T=your_uint32_type`
 * `-DWC_U64_T=your_uint64_type` (only needed with `WC_HASH_STRONG=1`)
+
+Custom `WC_U32_T` / `WC_U64_T` types must not require stricter alignment than
+`void*`, `size_t`, `unsigned long`, and `long double`.
 * `-DWC_PTRDIFF_MAX=...` if `<stdint.h>`/`PTRDIFF_MAX` is unavailable
 * `-DWC_HAVE_UINTPTR=0` if `<stdint.h>` is unavailable or has no `uintptr_t`
 
@@ -1005,6 +1019,9 @@ clang -std=c99 -O1 -g -fsanitize=address,undefined,fuzzer \
 * C99 core. Hosted libc is the default; freestanding/exotic builds require the
   documented configuration macros and may also need toolchain flags that disable
   compiler-injected runtime helpers.
+* Static-buffer mode uses the common C implementation model where aligned byte
+  storage can back typed internal objects. On a strict or unusual target that
+  rejects that model, use heap mode or provide compatible allocator macros.
 * Requires `CHAR_BIT == 8` and ASCII-compatible execution character set.
 * Tokenization is locale-independent ASCII.
 

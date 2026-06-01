@@ -8,6 +8,10 @@ behavior.
 - Language: C99. The public API requires no compiler extensions.
 - Default build assumes a hosted C environment. Freestanding and exotic targets
   are supported by the documented configuration macros.
+- Static-buffer mode assumes an implementation model that permits suitably
+  aligned byte storage to back typed internal objects. Strict ISO C does not
+  fully define that effective-type pattern for arbitrary `unsigned char`
+  backing arrays.
 - Required platform properties:
   - `CHAR_BIT == 8`
   - ASCII-compatible execution character set
@@ -38,7 +42,9 @@ behavior.
 `WC_U32_T` and `WC_U64_T` may override the internal hash integer types.
 Toolchains without usable `<stdint.h>` or `PTRDIFF_MAX` must define
 `WC_U32_T`, `WC_PTRDIFF_MAX`, and `WC_HAVE_UINTPTR=0`; strong-hash builds
-without `<stdint.h>` must also define `WC_U64_T`.
+without `<stdint.h>` must also define `WC_U64_T`. Custom hash integer types
+must not require stricter alignment than `void*`, `size_t`, `unsigned long`,
+and `long double`.
 
 ## Tokenization and Normalization
 
@@ -81,6 +87,11 @@ Static-buffer contracts:
 
 - `static_buf/static_size` provide all counted internal storage.
 - Buffers must be aligned to the library internal alignment.
+- The target must support using that aligned byte storage for typed internal
+  objects; otherwise use heap mode or compatible allocator macros.
+- Static-buffer mode uses one word arena block. With explicit `block_size`, that
+  value is the block capacity; unused static storage is not used for additional
+  word arena blocks.
 - Without `uintptr_t`, static-buffer mode is rejected unless
   `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1`.
 - Static layout preflight occurs before writing caller-provided static storage.

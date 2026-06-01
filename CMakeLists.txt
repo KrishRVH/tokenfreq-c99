@@ -493,6 +493,14 @@ if(BUILD_TESTING)
     add_dependencies(wc_compile_checks wc_compile_cpp)
   endif()
 
+  add_test(NAME wc_compile_invalid_config
+    COMMAND ${CMAKE_COMMAND}
+      -DWC_C_COMPILER=${CMAKE_C_COMPILER}
+      -DWC_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}
+      -DWC_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+      -DWC_TMP_DIR=${PROJECT_BINARY_DIR}/compile-invalid-config
+      -P ${PROJECT_SOURCE_DIR}/tests/compile_invalid_config.cmake)
+
   if(CMAKE_NM AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     add_test(NAME wc_no_libc_symbols
       COMMAND ${CMAKE_COMMAND}
