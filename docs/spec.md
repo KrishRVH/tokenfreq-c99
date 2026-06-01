@@ -34,10 +34,12 @@ behavior.
 | `WC_USE_LIBC_QSORT` | `WC_STDC_HOSTED` | Use libc `qsort`; otherwise use internal heapsort. |
 | `WC_HAVE_ERRNO` | `WC_STDC_HOSTED` | If `0`, `errno` is never read or written. |
 | `WC_NO_HEAP` | `0` | If `1`, the library never calls heap allocation macros. |
-| `WC_HAVE_UINTPTR` | auto | If `1`, static-buffer alignment checks use `uintptr_t`; if `0`, static-buffer mode fails closed unless explicit static-buffer alignment trust mode applies. |
-| `WC_TRUST_STATIC_BUFFER_ALIGNMENT` | `0` | If `1`, static-buffer alignment is a caller precondition when `uintptr_t` is unavailable. |
+| `WC_HAVE_UINTPTR` | auto | If `1`, `uintptr_t` is available. Static-buffer alignment checks use it only when `WC_LINEAR_UINTPTR_ALIGNMENT=1`. |
+| `WC_LINEAR_UINTPTR_ALIGNMENT` | `WC_HAVE_UINTPTR` | If `1`, `(uintptr_t)p % align` is assumed to reflect object alignment. Set to `0` on segmented or non-linear pointer-integer targets. |
+| `WC_TRUST_STATIC_BUFFER_ALIGNMENT` | `0` | If `1`, static-buffer alignment is a caller precondition when no runtime alignment check is available. |
 | `WC_HASH_STRONG` | `0` | If `1`, use SipHash-2-4; otherwise use FNV-1a. |
-| `WC_STACK_BUFFER` | `1` | If `0`, scan buffers are allocated from heap/static storage and counted. |
+| `WC_STACK_BUFFER` | `1` | If `0`, scan and normalization scratch buffers are allocated from heap/static storage and counted. |
+| `WC_STACK_MAX_WORD` | `4096` | Maximum permitted `WC_MAX_WORD` when `WC_STACK_BUFFER=1`; ignored otherwise. |
 
 `WC_U32_T` and `WC_U64_T` may override the internal hash integer types.
 Toolchains without usable `<stdint.h>` or `PTRDIFF_MAX` must define
@@ -45,6 +47,17 @@ Toolchains without usable `<stdint.h>` or `PTRDIFF_MAX` must define
 without `<stdint.h>` must also define `WC_U64_T`. Custom hash integer types
 must not require stricter alignment than `void*`, `size_t`, `unsigned long`,
 and `long double`.
+
+`WC_MAX_WORD` must be an integer constant `>= 4` and must leave room within
+`WC_PTRDIFF_MAX` for the stored trailing NUL, arena alignment padding, and the
+internal block header, and for `wc_stream` object storage. Invalid
+configurations fail to compile. When `WC_STACK_BUFFER=1`, it must also be
+`<= WC_STACK_MAX_WORD`.
+
+`WC_MIN_INIT_CAP` and `WC_DEFAULT_INIT_CAP` must be positive powers of two and
+must fit one internal slot-table object within `WC_PTRDIFF_MAX`.
+`WC_MIN_BLOCK_SZ` and `WC_DEFAULT_BLOCK_SZ` must fit one arena block object
+within `WC_PTRDIFF_MAX`.
 
 ## Tokenization and Normalization
 
@@ -55,6 +68,8 @@ and `long double`.
 - `wc_add_norm_n` folds the supplied prefix but does not tokenize it.
 - Length-based add APIs stop at the first embedded `'\0'` so stored words remain
   valid C strings.
+- `wc_scan` and `wc_stream_scan_ex` reject buffers larger than
+  `WC_PTRDIFF_MAX` with `WC_ERROR`.
 - Runtime `max_word` is clamped into `[4, WC_MAX_WORD]`; longer words are
   truncated without error.
 
@@ -64,7 +79,7 @@ Counted toward `wc_limits.max_bytes` when non-zero:
 
 - hash table storage and rehash growth
 - arena blocks for stored strings
-- scan buffer when `WC_STACK_BUFFER=0`
+- scan/normalization scratch buffer when `WC_STACK_BUFFER=0`
 - alignment padding for counted regions
 
 Not counted:
@@ -73,6 +88,15 @@ Not counted:
 - `wc_stream` objects from `wc_stream_open`
 - the `wc` handle itself in heap-enabled builds. In heapless mode, the aligned
   handle footprint is charged to the static budget.
+
+Custom allocator macros:
+
+- `WC_MALLOC(n)` must return `NULL` on failure.
+- Successful `WC_MALLOC` calls must return storage suitably aligned for any
+  object type allocated by the library, including `wc`, internal table/arena
+  objects, `wc_word`, and `wc_stream`.
+- Storage returned by `WC_MALLOC` must remain valid until passed to the matching
+  `WC_FREE`.
 
 Modes:
 
@@ -92,7 +116,7 @@ Static-buffer contracts:
 - Static-buffer mode uses one word arena block. With explicit `block_size`, that
   value is the block capacity; unused static storage is not used for additional
   word arena blocks.
-- Without `uintptr_t`, static-buffer mode is rejected unless
+- Without a usable linear `uintptr_t` alignment model, static-buffer mode is rejected unless
   `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1`.
 - Static layout preflight occurs before writing caller-provided static storage.
 
@@ -126,7 +150,7 @@ Static-buffer contracts:
   later scan/finish calls return `WC_ERROR`, and `wc_stream_close` remains safe.
 ## Public API
 
-Public functions:
+Public exported functions:
 
 ```text
 wc_open_ex, wc_open, wc_close,
@@ -137,6 +161,12 @@ wc_errstr, wc_version, wc_build_info,
 wc_get_stats, wc_reserve, wc_validate,
 wc_stream_open,
 wc_stream_scan_ex, wc_stream_finish, wc_stream_close
+```
+
+Public inline/helper macros:
+
+```text
+wc_limits_init, WC_LIMITS_INIT, WC_STATIC_BUFFER
 ```
 
 Conventions:
@@ -173,10 +203,21 @@ Conventions:
 - `WC_ERROR`: invalid argument or corrupted handle
 - `WC_NOMEM`: allocation failed, a budget/capacity limit was reached, or a
   counter would overflow
-- `WC_EALIGN`: caller-provided buffer alignment failure
-- `WC_EBADLIMITS`: inconsistent or undersized caller limits
+- `WC_EALIGN`: caller-provided buffer alignment failure, reported through
+  `wc_open_ex(err_out)`
+- `WC_EBADLIMITS`: inconsistent or undersized caller limits, reported through
+  `wc_open_ex(err_out)`
 
 `wc_errstr` maps every code to a stable lowercase string.
+
+`wc_stats` fields:
+
+- `bytes_used`: counted internal allocator bytes currently charged to the
+  instance.
+- `bytes_limit`: active `max_bytes` guard; `0` means no explicit guard.
+- `static_mode`: `1` when using `wc_limits.static_buf`.
+- `cap`: current hash table slot capacity.
+- `arena_blocks`: current arena block count.
 
 ## Build Profiles
 

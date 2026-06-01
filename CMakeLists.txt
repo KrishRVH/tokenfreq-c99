@@ -302,6 +302,39 @@ if(BUILD_TESTING)
   wc_apply_common(wc_test_noheap_nouintptr)
   add_test(NAME wc_test_noheap_nouintptr COMMAND wc_test_noheap_nouintptr)
 
+  add_library(wordcount_lib_noheap_nonlinear_uintptr STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_noheap_nonlinear_uintptr PUBLIC
+    WC_NO_HEAP=1
+    WC_STACK_BUFFER=0
+    WC_HAVE_UINTPTR=1
+    WC_LINEAR_UINTPTR_ALIGNMENT=0
+  )
+  wc_apply_common(wordcount_lib_noheap_nonlinear_uintptr)
+
+  add_executable(wc_test_noheap_nonlinear_uintptr tests/noheap_static.c)
+  target_link_libraries(wc_test_noheap_nonlinear_uintptr PRIVATE
+    wordcount_lib_noheap_nonlinear_uintptr)
+  wc_apply_common(wc_test_noheap_nonlinear_uintptr)
+  add_test(NAME wc_test_noheap_nonlinear_uintptr
+    COMMAND wc_test_noheap_nonlinear_uintptr)
+
+  add_library(wordcount_lib_noheap_nonlinear_uintptr_trust STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_noheap_nonlinear_uintptr_trust PUBLIC
+    WC_NO_HEAP=1
+    WC_STACK_BUFFER=0
+    WC_HAVE_UINTPTR=1
+    WC_LINEAR_UINTPTR_ALIGNMENT=0
+    WC_TRUST_STATIC_BUFFER_ALIGNMENT=1
+  )
+  wc_apply_common(wordcount_lib_noheap_nonlinear_uintptr_trust)
+
+  add_executable(wc_test_noheap_nonlinear_uintptr_trust tests/noheap_static.c)
+  target_link_libraries(wc_test_noheap_nonlinear_uintptr_trust PRIVATE
+    wordcount_lib_noheap_nonlinear_uintptr_trust)
+  wc_apply_common(wc_test_noheap_nonlinear_uintptr_trust)
+  add_test(NAME wc_test_noheap_nonlinear_uintptr_trust
+    COMMAND wc_test_noheap_nonlinear_uintptr_trust)
+
   add_library(wordcount_lib_noheap_tiny_autotune STATIC wordcount.c)
   set_target_properties(wordcount_lib_noheap_tiny_autotune PROPERTIES
     WC_DEF_USE_LIBC_STRING 0
@@ -336,6 +369,21 @@ if(BUILD_TESTING)
   )
   wc_apply_common(wc_test_counter_overflow)
   add_test(NAME wc_test_counter_overflow COMMAND wc_test_counter_overflow)
+
+  add_library(wordcount_lib_ptrdiff_caps STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_ptrdiff_caps PUBLIC
+    WC_PTRDIFF_MAX=4095
+    WC_DEFAULT_INIT_CAP=16
+    WC_DEFAULT_BLOCK_SZ=256
+    WC_MAX_WORD=64
+    WC_STACK_BUFFER=0
+  )
+  wc_apply_common(wordcount_lib_ptrdiff_caps)
+
+  add_executable(wc_test_ptrdiff_caps tests/ptrdiff_caps.c)
+  target_link_libraries(wc_test_ptrdiff_caps PRIVATE wordcount_lib_ptrdiff_caps)
+  wc_apply_common(wc_test_ptrdiff_caps)
+  add_test(NAME wc_test_ptrdiff_caps COMMAND wc_test_ptrdiff_caps)
 
   add_library(wordcount_lib_collision STATIC wordcount.c)
   target_compile_definitions(wordcount_lib_collision PRIVATE
@@ -433,6 +481,14 @@ if(BUILD_TESTING)
     WC_U32_T=unsigned
     WC_PTRDIFF_MAX=9223372036854775807L
   )
+  wc_add_compile_only(wc_compile_nonlinear_uintptr wordcount.c)
+  target_compile_definitions(wc_compile_nonlinear_uintptr PRIVATE
+    WC_U32_T=unsigned
+    WC_PTRDIFF_MAX=9223372036854775807L
+    WC_HAVE_UINTPTR=1
+    WC_LINEAR_UINTPTR_ALIGNMENT=0
+    WC_STACK_BUFFER=0
+  )
   add_library(wc_compile_noheap_libclight OBJECT wordcount.c)
   set_target_properties(wc_compile_noheap_libclight PROPERTIES
     WC_DEF_USE_LIBC_STRING 0
@@ -487,6 +543,7 @@ if(BUILD_TESTING)
   add_dependencies(wc_compile_checks wc_compile_msvc_sal)
   add_dependencies(wc_compile_checks wc_compile_nouintptr wc_compile_force_hash
                    wc_compile_custom_uintptr wc_compile_auto_uintptr
+                   wc_compile_nonlinear_uintptr
                    wc_compile_noheap_libclight
                    wc_compile_noheap_libclight_nouintptr)
   if(TARGET wc_compile_cpp)

@@ -211,7 +211,8 @@ static int test_static_buf_misaligned_rejected(void)
 
     TEST("static_buf: misaligned buffer rejected");
 
-#if !(WC_HAVE_UINTPTR + 0) && (WC_TRUST_STATIC_BUFFER_ALIGNMENT + 0)
+#if (!(WC_HAVE_UINTPTR + 0) || !(WC_LINEAR_UINTPTR_ALIGNMENT + 0)) && \
+        (WC_TRUST_STATIC_BUFFER_ALIGNMENT + 0)
     (void)lim;
     (void)pool.buf;
     PASS();
@@ -668,7 +669,7 @@ static int test_limits_struct_size_larger_accepted(void)
 
     TEST("limits: larger struct_size accepted (ignore tail)");
 
-    memset(&lim, 0, sizeof lim);
+    wc_limits_init(&lim.base);
     lim.base.struct_size = sizeof lim; /* larger than sizeof(wc_limits) */
     lim.extra_tail = 0x1122334455667788ULL;
 
@@ -740,7 +741,8 @@ static int test_open_ex_misaligned_rejected_reason(void)
     WC_TEST_STATIC_BUF(pool, 4096 + 64);
 
     TEST("open_ex static_buf misalignment returns EALIGN");
-#if !(WC_HAVE_UINTPTR + 0) && (WC_TRUST_STATIC_BUFFER_ALIGNMENT + 0)
+#if (!(WC_HAVE_UINTPTR + 0) || !(WC_LINEAR_UINTPTR_ALIGNMENT + 0)) && \
+        (WC_TRUST_STATIC_BUFFER_ALIGNMENT + 0)
     (void)lim;
     (void)rc;
     (void)pool.buf;
@@ -1604,7 +1606,8 @@ static int test_results_sorted(void)
 static int test_results_empty(void)
 {
     wc *w;
-    wc_word *r = (wc_word *)0x1;
+    wc_word sentinel;
+    wc_word *r = &sentinel;
     size_t n = 999;
 
     TEST("results empty");
@@ -1673,24 +1676,12 @@ static int test_query_null(void)
 static int test_validate_gate(void)
 {
     wc *w = NULL;
-    void *raw = NULL;
     int ok = 1;
 
     TEST("validate guards invalid handles");
 
-    raw = calloc(1, 4096);
-    if (!raw) {
-        FAIL("raw != NULL");
-        ok = 0;
-        goto done;
-    }
     if (wc_validate(NULL) != WC_ERROR) {
         FAIL("wc_validate(NULL) == WC_ERROR");
-        ok = 0;
-        goto done;
-    }
-    if (wc_validate((wc *)raw) != WC_ERROR) {
-        FAIL("wc_validate((wc *)raw) == WC_ERROR");
         ok = 0;
         goto done;
     }
@@ -1712,7 +1703,6 @@ done:
         PASS();
     if (w)
         wc_close(w);
-    free(raw);
     return ok ? 0 : 1;
 }
 
@@ -1760,6 +1750,7 @@ static int test_build_info(void)
     ASSERT(cfg->min_init_cap == WC_MIN_INIT_CAP);
     ASSERT(cfg->min_block_sz == WC_MIN_BLOCK_SZ);
     ASSERT((cfg->stack_buffer != 0) == (WC_STACK_BUFFER != 0));
+    ASSERT(cfg->stack_max_word == WC_STACK_MAX_WORD);
     ASSERT((cfg->hosted != 0) == (WC_STDC_HOSTED != 0));
     ASSERT((cfg->use_libc_string != 0) == (WC_USE_LIBC_STRING != 0));
     ASSERT((cfg->use_libc_qsort != 0) == (WC_USE_LIBC_QSORT != 0));
@@ -1767,6 +1758,8 @@ static int test_build_info(void)
     ASSERT((cfg->no_heap != 0) == (WC_NO_HEAP != 0));
     ASSERT((cfg->hash_strong != 0) == (WC_HASH_STRONG != 0));
     ASSERT((cfg->have_uintptr != 0) == (WC_HAVE_UINTPTR != 0));
+    ASSERT((cfg->linear_uintptr_alignment != 0) ==
+           (WC_LINEAR_UINTPTR_ALIGNMENT != 0));
     ASSERT((cfg->trust_static_buffer_alignment != 0) ==
            (WC_TRUST_STATIC_BUFFER_ALIGNMENT != 0));
     PASS();

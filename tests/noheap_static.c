@@ -39,7 +39,8 @@ static int test_tiny_static_fails(void)
     return 0;
 }
 
-#if !((WC_HAVE_UINTPTR) != 0) && !((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
+#if !(((WC_HAVE_UINTPTR) != 0) && ((WC_LINEAR_UINTPTR_ALIGNMENT) != 0)) && \
+        !((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
 static int test_static_requires_trust_without_uintptr(void)
 {
     wc_limits lim = WC_LIMITS_INIT();
@@ -57,7 +58,8 @@ static int test_static_requires_trust_without_uintptr(void)
 }
 #endif
 
-#if ((WC_HAVE_UINTPTR) != 0) || ((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
+#if (((WC_HAVE_UINTPTR) != 0) && ((WC_LINEAR_UINTPTR_ALIGNMENT) != 0)) || \
+        ((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
 static int test_omitted_handle_uses_static_buffer(void)
 {
     wc_limits lim = WC_LIMITS_INIT();
@@ -109,7 +111,8 @@ static int test_result_allocators_validate_args(void)
     wc_limits lim = WC_LIMITS_INIT();
     int rc = WC_ERROR;
     WC_STATIC_BUFFER(pool, 65536);
-    wc_word *out = (wc_word *)0x1;
+    wc_word sentinel;
+    wc_word *out = &sentinel;
     size_t n = 123;
     wc *w;
 
@@ -127,7 +130,7 @@ static int test_result_allocators_validate_args(void)
     CHECK(out == NULL);
     CHECK(n == 0);
 
-    out = (wc_word *)0x1;
+    out = &sentinel;
     n = 123;
     CHECK(wc_topn(NULL, 1, &out, &n) == WC_ERROR);
     CHECK(wc_topn(w, 1, NULL, &n) == WC_ERROR);
@@ -204,7 +207,8 @@ static int test_stream_open_unavailable_without_heap(void)
 
 int main(void)
 {
-#if !((WC_HAVE_UINTPTR) != 0) && !((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
+#if !(((WC_HAVE_UINTPTR) != 0) && ((WC_LINEAR_UINTPTR_ALIGNMENT) != 0)) && \
+        !((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
     CHECK(test_tiny_static_fails() == 0);
     CHECK(test_static_requires_trust_without_uintptr() == 0);
     return 0;

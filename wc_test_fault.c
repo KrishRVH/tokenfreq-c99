@@ -30,6 +30,17 @@ static int invariant_cursor_sum_matches_total(const wc *w)
     return (seen == wc_unique(w)) && (sum == wc_total(w));
 }
 
+static void make_word4(size_t i, char out[5])
+{
+    const size_t base = 26u;
+
+    out[0] = (char)('a' + (i / (base * base * base)) % base);
+    out[1] = (char)('a' + (i / (base * base)) % base);
+    out[2] = (char)('a' + (i / base) % base);
+    out[3] = (char)('a' + i % base);
+    out[4] = '\0';
+}
+
 /* --- Fault tests ----------------------------------------------------- */
 
 static void run_fault_open(int max_fail)
@@ -186,10 +197,15 @@ static int test_stream_finish_nomem_retry(void)
     wc_limits lim = WC_LIMITS_INIT();
     wc *w = NULL;
     wc_stream *s = NULL;
+    char pending[5];
+    size_t before_total = 0;
+    size_t before_unique = 0;
+    size_t i;
     int rc = WC_OK;
+    int found_pending = 0;
     int ok = 0;
 
-    lim.init_cap = 16;
+    lim.init_cap = 1024;
     lim.block_size = 1;
 
     w = wc_open_ex(4, &lim, &rc);
@@ -198,23 +214,52 @@ static int test_stream_finish_nomem_retry(void)
     if (wc_add(w, "aaaa") != WC_OK)
         goto done;
 
+    /*
+    ** Fill the current arena block until the next distinct 4-byte word would
+    ** require a fresh block allocation. This keeps the test valid when
+    ** WC_MIN_BLOCK_SZ changes.
+    */
+    for (i = 1; i < 1024u; i++) {
+        char word[5];
+
+        make_word4(i, word);
+        fault_arm(1);
+        rc = wc_add(w, word);
+        fault_reset();
+
+        if (rc == WC_OK)
+            continue;
+        if (rc != WC_NOMEM)
+            goto done;
+
+        memcpy(pending, word, sizeof pending);
+        found_pending = 1;
+        break;
+    }
+    if (!found_pending)
+        goto done;
+
+    before_total = wc_total(w);
+    before_unique = wc_unique(w);
+
     s = wc_stream_open(w, &rc);
     if (!s || rc != WC_OK)
         goto done;
-    if (wc_stream_scan_ex(s, "bbbb", 4, NULL) != WC_OK)
+    if (wc_stream_scan_ex(s, pending, 4, NULL) != WC_OK)
         goto done;
 
     fault_arm(1);
     rc = wc_stream_finish(s);
+    fault_reset();
     if (rc != WC_NOMEM)
         goto done;
-    if (wc_total(w) != 1 || wc_unique(w) != 1)
+    if (wc_total(w) != before_total || wc_unique(w) != before_unique)
         goto done;
 
     rc = wc_stream_finish(s);
     if (rc != WC_OK)
         goto done;
-    if (wc_total(w) != 2 || wc_unique(w) != 2)
+    if (wc_total(w) != before_total + 1u || wc_unique(w) != before_unique + 1u)
         goto done;
     if (!invariant_cursor_sum_matches_total(w))
         goto done;

@@ -4,7 +4,8 @@
 **
 **   Language: C99. Defaults to hosted libc; freestanding/exotic builds
 **   are supported via WC_STDC_HOSTED, WC_USE_LIBC_STRING, WC_USE_LIBC_QSORT,
-**   WC_HAVE_ERRNO, WC_NO_HEAP, and WC_TRUST_STATIC_BUFFER_ALIGNMENT.
+**   WC_HAVE_ERRNO, WC_NO_HEAP, WC_LINEAR_UINTPTR_ALIGNMENT, and
+**   WC_TRUST_STATIC_BUFFER_ALIGNMENT.
 **
 **   Threading/reentrancy: No global mutable state. Separate wc instances
 **   may be used concurrently. A single wc or wc_stream must not be used
@@ -13,20 +14,22 @@
 **   Encoding/word definition: Assumes 8-bit chars and ASCII-compatible
 **   execution character set. A "word" is a maximal run of ASCII letters
 **   [A-Za-z]; all other bytes are separators and case folding is ASCII-only.
-**   wc_scan accepts arbitrary byte sequences. wc_add/wc_add_n do not fold case
-**   and store the supplied bytes up to the first NUL; wc_add_norm_n does not
-**   tokenize and folds that same prefix using ASCII rules.
+**   wc_scan accepts arbitrary byte sequences up to WC_PTRDIFF_MAX bytes.
+**   wc_add/wc_add_n do not fold case and store the supplied bytes up to the
+**   first NUL; wc_add_norm_n does not tokenize and folds that same prefix using
+**   ASCII rules.
 **
 **   Maximum length: max_word is clamped into [4, WC_MAX_WORD]. Bytes
 **   beyond max_word are truncated (still counted); truncation never
 **   triggers an error.
 **
 **   Error model: status-returning APIs use WC_OK (0) for success and
-**   WC_ERROR / WC_NOMEM / WC_EALIGN / WC_EBADLIMITS as documented per
-**   function. wc_cursor_next() is a boolean iterator and
-**   returns 1 when it produces an item. err_out (when provided) is written
-**   on success and failure. errno is only touched on failures when
-**   WC_HAVE_ERRNO != 0. wc_errstr() yields stable, human-readable strings.
+**   WC_ERROR / WC_NOMEM as documented per function. WC_EALIGN and
+**   WC_EBADLIMITS are detailed wc_open_ex err_out statuses. wc_cursor_next() is
+**   a boolean iterator and returns 1 when it produces an item. err_out (when
+**   provided) is written on success and failure. errno is only touched on
+**   failures when WC_HAVE_ERRNO != 0. wc_errstr() yields stable,
+**   human-readable strings.
 **
 **   Ownership/lifetime: wc_word.word pointers returned by wc_results() and
 **   wc_topn() are owned by the wc instance and become invalid after wc_close().
@@ -44,7 +47,7 @@
 **     wc_errstr, wc_version, wc_build_info, wc_get_stats, wc_validate,
 **     wc_stream_open, wc_stream_scan_ex, wc_stream_finish, wc_stream_close.
 **
-**   Public helper macros: wc_limits_init, WC_LIMITS_INIT, WC_STATIC_BUFFER.
+**   Public helpers: wc_limits_init, WC_LIMITS_INIT, WC_STATIC_BUFFER.
 **   Supported build-configuration macros are documented below; they are not
 **   callable API surface.
 **
@@ -260,6 +263,13 @@
 #endif
 
 /* WC_PTRDIFF_MAX: override only on non-standard platforms missing PTRDIFF_MAX. */
+#if defined(WC_PTRDIFF_MAX) && WC_STDC_HOSTED && !defined(PTRDIFF_MAX)
+#include <stdint.h>
+#endif
+#if defined(WC_PTRDIFF_MAX) && defined(PTRDIFF_MAX) && \
+        ((WC_PTRDIFF_MAX) > (PTRDIFF_MAX))
+#error "WC_PTRDIFF_MAX must not exceed the platform PTRDIFF_MAX."
+#endif
 #ifndef WC_PTRDIFF_MAX
 /* Prefer the standard PTRDIFF_MAX from <stdint.h> (C99). */
 #if !defined(PTRDIFF_MAX)
@@ -326,15 +336,18 @@ extern "C" {
 #define WC_ERROR 1
 #define WC_NOMEM 2 /* resource exhausted: allocation, capacity, or counter */
 /*
-** More specific error codes used by wc_open_ex / streaming APIs.
-** Other functions return only WC_OK/WC_ERROR/WC_NOMEM.
+** More specific status codes written through wc_open_ex(err_out).
+** Other status-returning functions return only WC_OK/WC_ERROR/WC_NOMEM.
 */
 #define WC_EALIGN 3     /* misaligned caller-provided buffer */
 #define WC_EBADLIMITS 4 /* invalid/unsatisfiable limits (deterministic) */
 
 /*
-** Memory allocator configuration. Define these before including
-** wordcount.h to use a custom allocator.
+** Memory allocator configuration. Define these before including wordcount.h to
+** use a custom allocator. WC_MALLOC must behave like malloc for the requested
+** byte count: return NULL on failure, return storage suitably aligned for any
+** object type used by this library, and keep that storage valid until passed to
+** the matching WC_FREE.
 */
 
 #ifndef WC_MALLOC
@@ -349,12 +362,21 @@ extern "C" {
 **
 ** On tiny MCUs or deeply recursive call stacks, defining
 ** WC_STACK_BUFFER as 0 is recommended to avoid large fixed-size
-** arrays on the stack. In that mode, scan buffers are allocated
-** from the same internal pools that store words and hash slots.
+** arrays on the stack. In that mode, scan and normalization scratch buffers
+** are allocated from the same internal pools that store words and hash slots.
+**
+** WC_STACK_MAX_WORD:
+**   Upper bound allowed for WC_MAX_WORD when WC_STACK_BUFFER=1, because that
+**   mode declares automatic scratch arrays sized at WC_MAX_WORD. Raise this
+**   only when the target stack budget can support the larger arrays. Ignored
+**   when WC_STACK_BUFFER=0.
 */
 
 #ifndef WC_STACK_BUFFER
 #define WC_STACK_BUFFER 1
+#endif
+#ifndef WC_STACK_MAX_WORD
+#define WC_STACK_MAX_WORD 4096u
 #endif
 
 /*
@@ -362,21 +384,32 @@ extern "C" {
 **
 ** WC_MAX_WORD:
 **   Upper bound on max_word accepted by wc_open/wc_open_ex.
-**   Defaults to 1024. Lowering this reduces worst-case stack or
-**   heap usage for scan buffers. The implementation will clamp
-**   the runtime max_word argument into [4, WC_MAX_WORD].
+**   Defaults to 1024. Lowering this reduces worst-case scratch
+**   usage for scan and normalization buffers. The implementation will clamp
+**   the runtime max_word argument into [4, WC_MAX_WORD]. Must be an integer
+**   constant >= 4 and must leave room within WC_PTRDIFF_MAX for the stored
+**   trailing NUL, arena alignment padding, internal block header, and
+**   wc_stream object storage. Invalid configurations fail to compile. Must
+**   also be <= WC_STACK_MAX_WORD when WC_STACK_BUFFER=1.
 **
 ** WC_MIN_INIT_CAP:
 **   Lower bound on the initial hash table capacity (number of
 **   slots) chosen by the internal tuner. Defaults to 16. May be
 **   lowered for very small memory configurations; values must be
-**   > 0 and are rounded up to a power of two internally.
+**   positive powers of two and must fit within WC_PTRDIFF_MAX as one
+**   internal Slot table object.
 **
 ** WC_MIN_BLOCK_SZ:
 **   Lower bound on the first arena block size in bytes. Defaults
 **   to 256. May be lowered for tiny static buffers. Reducing this
 **   too far will limit how many distinct words can be stored
-**   before WC_NOMEM is returned.
+**   before WC_NOMEM is returned. Must leave room within
+**   WC_PTRDIFF_MAX for the internal block header.
+**
+** WC_DEFAULT_INIT_CAP / WC_DEFAULT_BLOCK_SZ:
+**   Initial default table capacity and arena block size. The init
+**   capacity must be a positive power of two. Both defaults must fit
+**   the same object-span constraints as WC_MIN_INIT_CAP/WC_MIN_BLOCK_SZ.
 */
 #ifndef WC_MAX_WORD
 #define WC_MAX_WORD 1024u
@@ -418,7 +451,8 @@ extern "C" {
 **       unsigned long, and long double.
 **   Defaults use <stdint.h> uint32_t/uint64_t.
 **   Targets without usable <stdint.h> should define WC_U32_T, WC_PTRDIFF_MAX,
-**   and WC_HAVE_UINTPTR=0 explicitly.
+**   and WC_HAVE_UINTPTR=0 explicitly. Targets with uintptr_t values unsuitable
+**   for modulo alignment checks should define WC_LINEAR_UINTPTR_ALIGNMENT=0.
 */
 #ifndef WC_U32_T
 #include <stdint.h>
@@ -450,6 +484,36 @@ extern "C" {
 #endif
 
 /*
+** WC_LINEAR_UINTPTR_ALIGNMENT:
+**   When 1, uintptr_t integer values are assumed to preserve enough linear
+**   address information for `(uintptr_t)p % align` to be a valid runtime
+**   alignment check. This is true for conventional hosted and embedded
+**   flat-address targets. Exotic or segmented targets that provide uintptr_t
+**   only for pointer round-tripping should define this to 0; static-buffer mode
+**   will then fail closed unless WC_TRUST_STATIC_BUFFER_ALIGNMENT=1 makes
+**   correct alignment a caller precondition.
+*/
+#ifndef WC_LINEAR_UINTPTR_ALIGNMENT
+#define WC_LINEAR_UINTPTR_ALIGNMENT WC_HAVE_UINTPTR
+#endif
+
+#ifdef WC_LINEAR_UINTPTR_ALIGNMENT
+#if (WC_LINEAR_UINTPTR_ALIGNMENT + 0)
+#undef WC_LINEAR_UINTPTR_ALIGNMENT
+#define WC_LINEAR_UINTPTR_ALIGNMENT 1
+#else
+#undef WC_LINEAR_UINTPTR_ALIGNMENT
+#define WC_LINEAR_UINTPTR_ALIGNMENT 0
+#endif
+#else
+#define WC_LINEAR_UINTPTR_ALIGNMENT 0
+#endif
+
+#if (WC_LINEAR_UINTPTR_ALIGNMENT + 0) && !(WC_HAVE_UINTPTR + 0)
+#error "WC_LINEAR_UINTPTR_ALIGNMENT=1 requires WC_HAVE_UINTPTR=1."
+#endif
+
+/*
 ** Opaque word counter handle.
 */
 typedef struct wc wc;
@@ -463,7 +527,8 @@ typedef struct wc wc;
 **     counted against this budget:
 **       - the hash table (Slot array and its growth)
 **       - the arena blocks used for word storage
-**       - the optional heap scan buffer when WC_STACK_BUFFER==0
+**       - the optional heap scan/normalization scratch buffer when
+**         WC_STACK_BUFFER==0
 **
 **     Not counted against this budget:
 **       - the wc handle itself in heap-enabled builds,
@@ -491,7 +556,8 @@ typedef struct wc wc;
 **     allocations. When static_buf is non-NULL and static_size > 0:
 **
 **       - The library does NOT call WC_MALLOC/WC_FREE for internal
-**         structures (hash table, arena blocks, heap scan buffer).
+**         structures (hash table, arena blocks, heap scan/normalization
+**         scratch buffer).
 **
 **       - All such objects are carved out of [static_buf,
 **         static_buf + static_size) using a simple bump allocator,
@@ -502,11 +568,12 @@ typedef struct wc wc;
 **         alignment at least as strict as that of void*, size_t, unsigned long,
 **         and long double is sufficient for supported configurations. Custom
 **         WC_U32_T / WC_U64_T types with stricter alignment are rejected at
-**         compile time. When uintptr_t is available, misaligned buffers are
-**         rejected at runtime. Without uintptr_t, static-buffer mode is rejected
-**         unless
-**         WC_TRUST_STATIC_BUFFER_ALIGNMENT=1; in that trust mode, alignment of
-**         static_buf is a caller precondition and cannot be verified at runtime.
+**         compile time. When uintptr_t is available and
+**         WC_LINEAR_UINTPTR_ALIGNMENT=1, misaligned buffers are rejected at
+**         runtime. Without a usable linear uintptr_t alignment model,
+**         static-buffer mode is rejected unless WC_TRUST_STATIC_BUFFER_ALIGNMENT=1;
+**         in that trust mode, alignment of static_buf is a caller precondition
+**         and cannot be verified at runtime.
 **
 **       - Static-buffer mode uses one arena block for word storage. With an
 **         explicit block_size, that value is the static word-storage capacity,
@@ -659,8 +726,12 @@ typedef struct wc_word {
 **     1 if WC_STACK_BUFFER was non-zero at build time, 0 otherwise.
 **
 **   hosted / use_libc_string / use_libc_qsort / have_errno / no_heap /
-**   hash_strong / have_uintptr / trust_static_buffer_alignment:
+**   hash_strong / have_uintptr / trust_static_buffer_alignment /
+**   linear_uintptr_alignment:
 **     Normalized build-time feature toggles for the compiled library.
+**
+**   stack_max_word:
+**     Compile-time WC_STACK_MAX_WORD used when building this library.
 */
 typedef struct wc_build_config {
     size_t struct_size;
@@ -678,10 +749,26 @@ typedef struct wc_build_config {
     int hash_strong;
     int have_uintptr;
     int trust_static_buffer_alignment;
+    int linear_uintptr_alignment;
+    size_t stack_max_word;
 } wc_build_config;
 
 /*
 ** Minimal runtime stats for observability and budgeting.
+**
+**   bytes_used:
+**     Counted internal allocator bytes currently charged to this wc. In static
+**     mode this includes alignment padding and, in WC_NO_HEAP=1 builds, the
+**     aligned handle footprint.
+**   bytes_limit:
+**     The active max_bytes guard. 0 means no explicit max_bytes guard; a static
+**     buffer can still bound allocation through static_size.
+**   static_mode:
+**     1 when internal allocations are carved from wc_limits.static_buf.
+**   cap:
+**     Current hash table slot capacity.
+**   arena_blocks:
+**     Current arena block count. Static-buffer mode uses one arena block.
 */
 typedef struct wc_stats {
     size_t bytes_used;
@@ -730,6 +817,7 @@ WC_API WC_WUR int wc_add(wc *w, const char *word);
 WC_API WC_WUR int wc_add_n(wc *w, const char *word, size_t len);
 WC_API WC_WUR int wc_add_norm_n(wc *w, const char *word, size_t len);
 /* Note: for length-based adds, embedded '\0' terminates the word (prefix is used). */
+/* wc_scan rejects len > WC_PTRDIFF_MAX with WC_ERROR. */
 WC_API WC_WUR int wc_scan(wc *w, const char *text, size_t len);
 
 /*
@@ -743,7 +831,7 @@ WC_API size_t wc_total(const wc *w);
 WC_API size_t wc_unique(const wc *w);
 
 /*
-** Get sorted results (by count desc, then alphabetically).
+** Get sorted results (by count desc, then bytewise word ascending).
 **
 **   out: Receives pointer to array (caller must free via
 **        wc_results_free)
@@ -767,7 +855,7 @@ WC_API WC_WUR int wc_results(const wc *w, wc_word **out, size_t *n);
 */
 WC_API void wc_results_free(wc_word *r);
 
-/* Top-N helper (count desc, then lexicographic).
+/* Top-N helper (count desc, then bytewise word ascending).
 **
 ** Note: The output array returned via *out is allocated via WC_MALLOC and is
 ** not counted against max_bytes in wc_limits, nor against any static buffer
@@ -874,6 +962,8 @@ WC_API wc_stream *wc_stream_open(wc *w, int *err_out);
 /*
 ** Scan a chunk. consumed_out (optional) receives the number of bytes
 ** consumed before returning. On WC_OK before finish, consumed_out == len.
+** len must be <= WC_PTRDIFF_MAX; larger chunks return WC_ERROR with no
+** progress.
 ** After a terminal wc_stream_finish() result, wc_stream_scan_ex() returns the
 ** saved finish status and leaves consumed_out at 0.
 ** If insertion of a buffered word fails while scanning a separator, the stream

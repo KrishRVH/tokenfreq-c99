@@ -110,14 +110,14 @@ wc_reserve(w, 1024, 0);       /* best-effort preflight */
 /* ... feed data ... */
 wc_word *out = NULL; size_t n = 0;
 wc_topn(w, 10, &out, &n);
-/* counts sorted by count desc, then lex asc */
+/* counts sorted by count desc, then bytewise word asc */
 wc_results_free(out);
 wc_close(w);
 ```
 
 Length-based adds (`wc_add_n` / `wc_add_norm_n`) truncate at the first embedded
-`'\0'` so stored words remain valid C strings for sorting and comparison. `wc_scan`
-continues to accept arbitrary bytes.
+`'\0'` so stored words remain valid C strings for sorting and comparison.
+`wc_scan` accepts arbitrary bytes up to `WC_PTRDIFF_MAX` bytes.
 
 ---
 
@@ -243,7 +243,8 @@ In static-buffer mode:
 
 * Only a **single initial block** is used; no further blocks are allocated.
 * With the default `block_size=0`, `wc_open_ex` sizes that block to use the
-  remaining effective static budget after the table, handle, and scan buffer.
+  remaining effective static budget after the table, optional
+  scan/normalization scratch buffer, and, in `WC_NO_HEAP=1` builds, the handle.
   Explicit static `block_size` values are honored when the dry run can satisfy
   the requested layout; the explicit value is the word-storage capacity of that
   single static arena block.
@@ -287,12 +288,14 @@ For MCU-style environments without reliable `malloc`/`free`,
 
 In this mode:
 
-* **All internal allocations** (hash table, first arena block, heap/static scan
-  buffer when `WC_STACK_BUFFER == 0`) use a bump allocator inside the static buffer.
+* **All internal allocations** (hash table, first arena block, heap/static
+  scan/normalization scratch buffer when `WC_STACK_BUFFER == 0`) use a bump
+  allocator inside the static buffer.
 * **No re-use** or freeing occurs inside the buffer.
 * **Alignment matters**: use the `WC_STATIC_BUFFER(name, size)` helper to get
   portable alignment for the internal types. Misaligned buffers are rejected
-  with `WC_EALIGN` when runtime pointer-alignment checks are available.
+  with `WC_EALIGN` when runtime pointer-alignment checks are available on a
+  conventional linear `uintptr_t` representation.
 * **Hash table growth is disabled**:
 
   * Once the load factor exceeds ~0.7, inserting a *new unique* word fails with `WC_NOMEM`.
@@ -332,20 +335,25 @@ To make behavior deterministic and fail-fast:
 
   * The initial hash table
   * The first arena block
-  * The optional heap/static scan buffer (if `WC_STACK_BUFFER == 0`)
+  * The optional heap/static scan/normalization scratch buffer (if
+    `WC_STACK_BUFFER == 0`)
   * If any simulated allocation would fail under the effective budget
     (`min(static_size, max_bytes)` when both are set), `wc_open_ex` returns
     `NULL` without creating the instance.
 
 Static buffer alignment:
 
-- When `uintptr_t` is available, `wc_open_ex` verifies `static_buf` alignment
-  at runtime.
-- If `uintptr_t` is not available, static-buffer mode is rejected unless
-  `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` is set. That trust mode disables runtime
-  alignment checks and makes correct alignment of `static_buf` a caller
-  precondition.
-- There is intentionally no “size_t-based” runtime fallback, because pointer-to-integer conversions are only reliably supported via `uintptr_t`.
+- When `uintptr_t` is available and `WC_LINEAR_UINTPTR_ALIGNMENT=1`,
+  `wc_open_ex` verifies `static_buf` alignment at runtime using integer
+  modulo. Targets with segmented or otherwise non-linear pointer integers
+  should define `WC_LINEAR_UINTPTR_ALIGNMENT=0`.
+- If a usable linear `uintptr_t` alignment check is not available, static-buffer
+  mode is rejected unless `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` is set. That
+  trust mode disables runtime alignment checks and makes correct alignment of
+  `static_buf` a caller precondition.
+- There is intentionally no “size_t-based” runtime fallback, and `uintptr_t`
+  alone is not enough for exotic targets unless its integer representation is
+  known to preserve alignment modulo.
 - `WC_STATIC_BUFFER` provides the required alignment for supported
   configurations. Static-buffer mode also assumes the implementation permits
   suitably aligned caller-provided byte storage to back typed internal objects.
@@ -396,8 +404,8 @@ All public functions follow a clear error protocol:
   * `WC_ERROR` (1) – invalid arguments or internal consistency failure
   * `WC_NOMEM` (2) – allocation failed, a memory/capacity limit was reached,
     or a counter would overflow
-  * `WC_EALIGN` and `WC_EBADLIMITS` – more specific failures from
-    caller-storage and open paths
+  * `WC_EALIGN` and `WC_EBADLIMITS` – more specific failures reported through
+    `wc_open_ex(err_out)`
 * `wc_cursor_next`:
 
   * Boolean iterator: returns 1 when it produces an item, 0 at end or for an
@@ -464,7 +472,8 @@ Per-instance memory and sizing limits:
 
     * Hash table (and growth)
     * Arena blocks (dynamic mode only; static mode uses first block only)
-    * Optional heap/static scan buffer (if `WC_STACK_BUFFER == 0`)
+    * Optional heap/static scan/normalization scratch buffer (if
+      `WC_STACK_BUFFER == 0`)
   * Does **not** count:
 
     * The `wc` struct itself in heap-enabled builds
@@ -531,7 +540,19 @@ typedef struct wc_build_config {
     int           hash_strong;
     int           have_uintptr;
     int           trust_static_buffer_alignment;
+    int           linear_uintptr_alignment;
+    size_t        stack_max_word;
 } wc_build_config;
+```
+
+```c
+typedef struct wc_stats {
+    size_t bytes_used;   /* counted internal allocator bytes */
+    size_t bytes_limit;  /* 0 = no explicit max_bytes guard */
+    int    static_mode;  /* 1 = using wc_limits.static_buf */
+    size_t cap;          /* hash table slot capacity */
+    size_t arena_blocks; /* static-buffer mode uses one */
+} wc_stats;
 ```
 
 ```c
@@ -551,9 +572,22 @@ typedef struct wc_cursor {
 #define WC_EBADLIMITS 4 /* invalid/unsatisfiable limits */
 ```
 
-`WC_EALIGN` / `WC_EBADLIMITS` are returned by `wc_open_ex` when the
-caller-provided buffers/limits are unusable; most other functions return only
-`WC_OK` / `WC_ERROR` / `WC_NOMEM`.
+`WC_EALIGN` / `WC_EBADLIMITS` are reported through `wc_open_ex`'s `err_out`
+when caller-provided buffers/limits are unusable; most other functions return
+only `WC_OK` / `WC_ERROR` / `WC_NOMEM`.
+
+### Public Helpers
+
+```c
+void wc_limits_init(wc_limits *limits);
+#define WC_LIMITS_INIT() /* initializer expression */
+#define WC_STATIC_BUFFER(name, size_) /* aligned byte storage declaration */
+```
+
+Use `wc_limits_init` or `WC_LIMITS_INIT()` before passing a `wc_limits` value to
+`wc_open_ex`. Use `WC_STATIC_BUFFER` when supplying `wc_limits.static_buf` so the
+storage has the alignment required by the documented static-buffer contract.
+
 ### Lifecycle Functions
 
 ```c
@@ -578,7 +612,7 @@ Key semantics:
 * `wc_add_norm_n` stores the supplied prefix after ASCII case folding; it does
   not tokenize. Embedded `'\0'` terminates the word.
 * `wc_scan` is case-insensitive under the same folding rules and performs
-  tokenization.
+  tokenization. `len > WC_PTRDIFF_MAX` is rejected with `WC_ERROR`.
 * Words are truncated at `max_word` and the hash/equality operate on the stored prefix.
 
 Partial-progress semantics under `WC_NOMEM`:
@@ -604,6 +638,9 @@ int wc_reserve(wc *w, size_t expected_unique, size_t expected_bytes);
 
 * `wc_results` / `wc_topn`: allocate via `WC_MALLOC`; caller frees with
   `wc_results_free`. Unavailable when `WC_NO_HEAP=1` (returns `WC_NOMEM`).
+* `wc_get_stats`: writes allocator/capacity observability only. `bytes_limit==0`
+  means no explicit `max_bytes` guard; static buffers can still bound allocation
+  through `static_size`.
 * `wc_cursor`: zero-allocation enumeration. Iteration order is hash-table order;
   sort externally if a sorted no-heap result is required.
 * `wc_reserve`: best-effort preflight/growth helper for `expected_unique`
@@ -625,7 +662,8 @@ Streaming matches `wc_scan` for tokenization, normalization, and truncation.
 If insertion of a buffered word fails while scanning a separator,
 `wc_stream_scan_ex` reports partial consumption via `consumed_out`, discards
 that word, and leaves the stream usable for forward progress. `WC_ERROR` from
-invalid arguments, detached streams, or oversized chunks is fatal/no-progress.
+invalid arguments, detached streams, or chunks larger than `WC_PTRDIFF_MAX` is
+fatal/no-progress.
 If the parent `wc` is closed first, open streams are detached: later scan/finish
 calls return `WC_ERROR`, and `wc_stream_close` remains safe. `wc_stream_finish`
 must be called before close when a trailing word should be counted. If
@@ -654,7 +692,11 @@ Iteration order is implementation-defined (hash table order) and not sorted.
 const char *wc_errstr(int rc);
 const char *wc_version(void);
 const wc_build_config *wc_build_info(void);
+int wc_validate(const wc *w);
 ```
+
+`wc_validate` performs a shallow readiness check by default. Full invariant
+validation is compiled in when `WC_ENABLE_VALIDATE=1`.
 
 ---
 
@@ -696,14 +738,21 @@ Used for:
 * Arrays returned by `wc_results` and `wc_topn`
 * Stream objects returned by `wc_stream_open`
 
+`WC_MALLOC` must return `NULL` on failure and otherwise return storage suitably
+aligned for any object type used by the library (`wc`, `Block`, `Slot`,
+`wc_word`, and `wc_stream`). Storage must remain valid until passed to the
+matching `WC_FREE`.
+
 #### Stack vs. Heap Scan Buffer
 
 ```c
 #define WC_STACK_BUFFER 0  /* default is 1 */
 ```
 
-* When `1` (default): `wc_scan` uses a stack buffer sized at `WC_MAX_WORD`.
-* When `0`: `wc_scan` uses a per-instance buffer sized at runtime `max_word`:
+* When `1` (default): `wc_scan` and `wc_add_norm_n` use stack scratch buffers
+  sized at `WC_MAX_WORD`. `WC_MAX_WORD` must be <= `WC_STACK_MAX_WORD`.
+* When `0`: `wc_scan` and `wc_add_norm_n` use a per-instance buffer sized at
+  runtime `max_word`:
 
   * allocated once per `wc`
   * freed in `wc_close`
@@ -713,9 +762,20 @@ Used for:
 
 ```c
 #define WC_MAX_WORD     1024u
+#define WC_STACK_MAX_WORD 4096u
 #define WC_MIN_INIT_CAP 16u
 #define WC_MIN_BLOCK_SZ 256u
 ```
+
+`WC_MAX_WORD` must be an integer constant `>= 4` and must leave room within
+`WC_PTRDIFF_MAX` for the stored trailing NUL, arena alignment padding, and the
+internal block header, and for `wc_stream` object storage. `WC_MIN_INIT_CAP`
+and `WC_DEFAULT_INIT_CAP` must be positive powers of two and must fit one
+internal slot-table object within `WC_PTRDIFF_MAX`; `WC_MIN_BLOCK_SZ` and
+`WC_DEFAULT_BLOCK_SZ` must fit one arena block object within `WC_PTRDIFF_MAX`.
+Invalid configurations fail to compile. `WC_MAX_WORD` must also be
+`<= WC_STACK_MAX_WORD` when `WC_STACK_BUFFER=1`; `WC_STACK_MAX_WORD` is ignored
+when `WC_STACK_BUFFER=0`.
 
 #### Default Initial Sizing
 
@@ -823,6 +883,8 @@ Custom `WC_U32_T` / `WC_U64_T` types must not require stricter alignment than
 `void*`, `size_t`, `unsigned long`, and `long double`.
 * `-DWC_PTRDIFF_MAX=...` if `<stdint.h>`/`PTRDIFF_MAX` is unavailable
 * `-DWC_HAVE_UINTPTR=0` if `<stdint.h>` is unavailable or has no `uintptr_t`
+* `-DWC_LINEAR_UINTPTR_ALIGNMENT=0` if `uintptr_t` exists only for pointer
+  round-tripping and cannot be used for modulo alignment checks
 
 Tiny RAM profile:
 
@@ -870,7 +932,7 @@ CLI:
 cc -std=c99 -O2 wordcount.c wc_main.c -o wc
 ```
 
-Heap/static scan buffer:
+Heap/static scan/normalization scratch buffer:
 
 ```bash
 cc -std=c99 -O2 -DWC_STACK_BUFFER=0 wordcount.c your_program.c -o your_program
@@ -956,8 +1018,8 @@ Behavior:
   `--help` and `--version` remain available to diagnose build mismatches.
 * `--top N` without length filters uses `wc_topn()` and allocates only the
   displayed rows. Non-quiet `--all` and length-filtered output require a full
-  sorted result array (count desc, then lex asc); quiet length-filtered output
-  counts matches through the zero-allocation cursor.
+  sorted result array (count desc, then bytewise word asc); quiet
+  length-filtered output counts matches through the zero-allocation cursor.
 
 ### Environment-Based Limits
 
@@ -1029,9 +1091,9 @@ clang -std=c99 -O1 -g -fsanitize=address,undefined,fuzzer \
 
 ## Adversarial Inputs and Complexity
 
-* `wc_scan` accepts arbitrary byte sequences (including embedded NULs); `wc_add_n`
-  and `wc_add_norm_n` truncate at the first embedded `'\0'` to keep stored words
-  valid C strings for sorting/comparison.
+* `wc_scan` accepts arbitrary byte sequences up to `WC_PTRDIFF_MAX` bytes
+  (including embedded NULs); `wc_add_n` and `wc_add_norm_n` truncate at the first
+  embedded `'\0'` to keep stored words valid C strings for sorting/comparison.
 * Not cryptographic / not DoS-hard hashing.
 * For untrusted inputs:
 

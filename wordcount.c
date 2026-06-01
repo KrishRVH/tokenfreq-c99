@@ -18,7 +18,8 @@
 **   - Collision-safe comparisons (stores key length per slot)
 **
 **   - All allocations that count against wc_limits budgets (table, arena blocks,
-**     heap scan buffer when enabled) are routed through wc_alloc_state.
+**     heap scan/normalization scratch buffer when enabled) are routed through
+**     wc_alloc_state.
 **     Allocations that are explicitly outside the wc allocator budget use
 **     WC_MALLOC/WC_FREE and are not counted: the wc handle in heap-enabled
 **     builds, arrays returned by wc_results()/wc_topn(), and the wc_stream
@@ -47,7 +48,8 @@
 #include "wordcount.h"
 #define WC_INTERNAL_BOOL(x) ((x) != 0)
 
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
+#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
+        WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)
 #include <stdint.h>
 #endif
 #ifndef WC_OMIT_ASSERT
@@ -179,38 +181,6 @@ static void *wc_memchr_internal(const void *s, int c, size_t n)
 #endif
 }
 
-static void
-wc_copy_struct_prefix(void *dst, size_t dst_sz, const void *src, size_t src_sz)
-{
-    size_t n = src_sz < dst_sz ? src_sz : dst_sz;
-    wc_memset_internal(dst, 0, dst_sz);
-    if (src && src_sz)
-        wc_memcpy_internal(dst, src, n);
-}
-
-static void wc_limits_sanitize(wc_limits *lim, size_t in_size)
-{
-#define WC_HAS(field) \
-    ((in_size) >= offsetof(wc_limits, field) + sizeof((lim)->field))
-
-    if (!WC_HAS(max_bytes))
-        lim->max_bytes = 0;
-    if (!WC_HAS(init_cap))
-        lim->init_cap = 0;
-    if (!WC_HAS(block_size))
-        lim->block_size = 0;
-    if (!WC_HAS(static_buf))
-        lim->static_buf = NULL;
-    if (!WC_HAS(static_size))
-        lim->static_size = 0;
-    if (!WC_HAS(hash_seed))
-        lim->hash_seed = 0;
-    if (!WC_HAS(strict_max_bytes))
-        lim->strict_max_bytes = 0;
-
-#undef WC_HAS
-}
-
 static int wc_load_limits(wc_limits *out, const wc_limits *in)
 {
     size_t in_size;
@@ -226,8 +196,24 @@ static int wc_load_limits(wc_limits *out, const wc_limits *in)
     if (in_size < offsetof(wc_limits, struct_size) + sizeof(in->struct_size))
         return WC_ERROR;
 
-    wc_copy_struct_prefix(out, sizeof(*out), in, in_size);
-    wc_limits_sanitize(out, in_size);
+    wc_limits_init(out);
+#define WC_COPY_FIELD(field)                                                \
+    do {                                                                    \
+        if (in_size >=                                                      \
+            offsetof(wc_limits, field) + sizeof(((wc_limits *)0)->field)) { \
+            out->field = in->field;                                         \
+        }                                                                   \
+    } while (0)
+
+    WC_COPY_FIELD(max_bytes);
+    WC_COPY_FIELD(strict_max_bytes);
+    WC_COPY_FIELD(init_cap);
+    WC_COPY_FIELD(block_size);
+    WC_COPY_FIELD(static_buf);
+    WC_COPY_FIELD(static_size);
+    WC_COPY_FIELD(hash_seed);
+
+#undef WC_COPY_FIELD
     out->struct_size = sizeof(*out);
     return WC_OK;
 }
@@ -251,17 +237,30 @@ WC_STATIC_ASSERT('A' == 65 && 'Z' == 90 && 'a' == 97 && 'z' == 122 &&
                  ascii_charset_required);
 
 WC_STATIC_ASSERT(CHAR_BIT == 8, char_bit_must_be_8);
+WC_STATIC_ASSERT((WC_PTRDIFF_MAX) > 0, wc_ptrdiff_max_must_be_positive);
 WC_STATIC_ASSERT(WC_SIZE_MAX == (size_t)-1, wc_size_max_must_match_size_t);
 WC_STATIC_ASSERT(sizeof(wc_u32) * CHAR_BIT == 32, wc_u32_must_be_32_bits);
 WC_STATIC_ASSERT(((wc_u32)0 - (wc_u32)1) > (wc_u32)0, wc_u32_must_be_unsigned);
 
 WC_STATIC_ASSERT((WC_MAX_WORD) >= 4, wc_max_word_must_be_at_least_4);
+WC_STATIC_ASSERT((WC_MAX_WORD) <= (size_t)WC_PTRDIFF_MAX,
+                 wc_max_word_must_fit_ptrdiff);
+#if WC_INTERNAL_BOOL(WC_STACK_BUFFER)
+WC_STATIC_ASSERT((WC_STACK_MAX_WORD) >= 4,
+                 wc_stack_max_word_must_be_at_least_4);
+WC_STATIC_ASSERT((WC_MAX_WORD) <= (WC_STACK_MAX_WORD),
+                 wc_max_word_too_large_for_stack_buffer);
+#endif
 WC_STATIC_ASSERT((WC_MIN_INIT_CAP) >= 1, wc_min_init_cap_must_be_positive);
 WC_STATIC_ASSERT((WC_MIN_BLOCK_SZ) >= 1, wc_min_block_sz_must_be_positive);
 WC_STATIC_ASSERT((WC_DEFAULT_INIT_CAP) >= 1,
                  wc_default_init_cap_must_be_positive);
 WC_STATIC_ASSERT((WC_DEFAULT_BLOCK_SZ) >= 1,
                  wc_default_block_sz_must_be_positive);
+WC_STATIC_ASSERT(((WC_MIN_INIT_CAP) & ((WC_MIN_INIT_CAP)-1u)) == 0,
+                 wc_min_init_cap_must_be_power_of_two);
+WC_STATIC_ASSERT(((WC_DEFAULT_INIT_CAP) & ((WC_DEFAULT_INIT_CAP)-1u)) == 0,
+                 wc_default_init_cap_must_be_power_of_two);
 WC_STATIC_ASSERT((WC_DEFAULT_INIT_CAP) >= (WC_MIN_INIT_CAP),
                  wc_default_init_cap_too_small);
 WC_STATIC_ASSERT((WC_DEFAULT_BLOCK_SZ) >= (WC_MIN_BLOCK_SZ),
@@ -292,26 +291,52 @@ typedef union {
 } wc_internal_align;
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#define WC_ALIGNOF(T) _Alignof(T)
+#define WC_HAVE_NATIVE_ALIGNOF 1
+#define WC_ALIGNOF_TYPE(T) _Alignof(T)
 #elif defined(_MSC_VER)
-#define WC_ALIGNOF(T) __alignof(T)
+#define WC_HAVE_NATIVE_ALIGNOF 1
+#define WC_ALIGNOF_TYPE(T) __alignof(T)
 #elif defined(__GNUC__) || defined(__clang__)
-#define WC_ALIGNOF(T) __alignof__(T)
+#define WC_HAVE_NATIVE_ALIGNOF 1
+#define WC_ALIGNOF_TYPE(T) __alignof__(T)
 #else
-#define WC_ALIGNOF(T)   \
-    ((size_t)offsetof(  \
-            struct {    \
-                char c; \
-                T x;    \
-            },          \
-            x))
+#define WC_HAVE_NATIVE_ALIGNOF 0
 #endif
 
-#define WC_ALIGN WC_ALIGNOF(wc_internal_align)
-WC_STATIC_ASSERT(WC_ALIGN >= 1u, wc_align_must_be_positive);
-WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(wc_u32), wc_u32_alignment_too_strict);
+#if WC_HAVE_NATIVE_ALIGNOF
+#define WC_ALIGNOF_INTERNAL_ALIGN WC_ALIGNOF_TYPE(wc_internal_align)
+#define WC_ALIGNOF_U32 WC_ALIGNOF_TYPE(wc_u32)
 #if WC_INTERNAL_BOOL(WC_HASH_STRONG)
-WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(wc_u64), wc_u64_alignment_too_strict);
+#define WC_ALIGNOF_U64 WC_ALIGNOF_TYPE(wc_u64)
+#endif
+#else
+typedef struct {
+    char c;
+    wc_internal_align x;
+} wc_alignof_internal_align_t;
+typedef struct {
+    char c;
+    wc_u32 x;
+} wc_alignof_u32_t;
+#if WC_INTERNAL_BOOL(WC_HASH_STRONG)
+typedef struct {
+    char c;
+    wc_u64 x;
+} wc_alignof_u64_t;
+#endif
+#define WC_ALIGNOF_INTERNAL_ALIGN \
+    ((size_t)offsetof(wc_alignof_internal_align_t, x))
+#define WC_ALIGNOF_U32 ((size_t)offsetof(wc_alignof_u32_t, x))
+#if WC_INTERNAL_BOOL(WC_HASH_STRONG)
+#define WC_ALIGNOF_U64 ((size_t)offsetof(wc_alignof_u64_t, x))
+#endif
+#endif
+
+#define WC_ALIGN WC_ALIGNOF_INTERNAL_ALIGN
+WC_STATIC_ASSERT(WC_ALIGN >= 1u, wc_align_must_be_positive);
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF_U32, wc_u32_alignment_too_strict);
+#if WC_INTERNAL_BOOL(WC_HASH_STRONG)
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF_U64, wc_u64_alignment_too_strict);
 #endif
 
 #if defined(_MSC_VER)
@@ -374,6 +399,37 @@ static int mul_overflows(size_t a, size_t b)
     return b != 0 && a > WC_SIZE_MAX / b;
 }
 
+static int wc_object_span_valid(size_t n)
+{
+    return n <= (size_t)WC_PTRDIFF_MAX;
+}
+
+static int wc_add_object_span(size_t a, size_t b, size_t *out)
+{
+    size_t n;
+
+    if (!out || add_overflows(a, b))
+        return 0;
+    n = a + b;
+    if (!wc_object_span_valid(n))
+        return 0;
+    *out = n;
+    return 1;
+}
+
+static int wc_mul_object_span(size_t a, size_t b, size_t *out)
+{
+    size_t n;
+
+    if (!out || mul_overflows(a, b))
+        return 0;
+    n = a * b;
+    if (!wc_object_span_valid(n))
+        return 0;
+    *out = n;
+    return 1;
+}
+
 static size_t wc_pow2_round_up(size_t n)
 {
     size_t p = 1;
@@ -398,25 +454,27 @@ static int wc_min_word_block_size(size_t runtime_max_word, size_t *out)
 
     if (!out)
         return 0;
-    if (add_overflows(runtime_max_word, 1u))
+    if (!wc_add_object_span(runtime_max_word, 1u, &need))
         return 0;
-    need = runtime_max_word + 1u;
-    if (add_overflows(need, WC_ALIGN - 1u))
+    if (!wc_add_object_span(need, WC_ALIGN - 1u, &need))
         return 0;
-    need += WC_ALIGN - 1u;
     if (need < WC_MIN_BLOCK_SZ)
         need = WC_MIN_BLOCK_SZ;
+    if (!wc_object_span_valid(need))
+        return 0;
     *out = need;
     return 1;
 }
 
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) || \
+#if (WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) &&              \
+     WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)) || \
         WC_INTERNAL_BOOL(WC_TRUST_STATIC_BUFFER_ALIGNMENT)
 static int wc_ptr_aligned(const void *p, size_t align)
 {
     if (!p || align == 0)
         return 0;
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
+#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
+        WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)
     return ((uintptr_t)p % align) == 0;
 #else
     (void)align;
@@ -531,14 +589,125 @@ struct wc {
     int owns_self;
 
 #if !WC_INTERNAL_BOOL(WC_STACK_BUFFER)
-    char *scanbuf; /* per-instance scan buffer (size maxw) */
+    char *scanbuf; /* per-instance scan/normalization scratch buffer */
     size_t scanbuf_size;
 #endif
     wc_stream *streams;
 };
 
-WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(Slot), wc_align_must_cover_slot);
-WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF(struct wc), wc_align_must_cover_wc);
+#if WC_HAVE_NATIVE_ALIGNOF
+#define WC_ALIGNOF_SLOT WC_ALIGNOF_TYPE(Slot)
+#define WC_ALIGNOF_WC WC_ALIGNOF_TYPE(struct wc)
+#else
+typedef struct {
+    char c;
+    Slot x;
+} wc_alignof_slot_t;
+typedef struct {
+    char c;
+    struct wc x;
+} wc_alignof_wc_t;
+#define WC_ALIGNOF_SLOT ((size_t)offsetof(wc_alignof_slot_t, x))
+#define WC_ALIGNOF_WC ((size_t)offsetof(wc_alignof_wc_t, x))
+#endif
+
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF_SLOT, wc_align_must_cover_slot);
+WC_STATIC_ASSERT(WC_ALIGN >= WC_ALIGNOF_WC, wc_align_must_cover_wc);
+WC_STATIC_ASSERT(sizeof(Block) <= (size_t)WC_PTRDIFF_MAX,
+                 block_must_fit_ptrdiff);
+WC_STATIC_ASSERT((size_t)WC_PTRDIFF_MAX >=
+                         sizeof(Block) + WC_ALIGN + (size_t)MIN_WORD,
+                 wc_ptrdiff_max_too_small_for_min_word_block);
+WC_STATIC_ASSERT((WC_MAX_WORD) <=
+                         (size_t)WC_PTRDIFF_MAX - sizeof(Block) - WC_ALIGN,
+                 wc_max_word_must_leave_block_overhead);
+WC_STATIC_ASSERT((WC_MIN_BLOCK_SZ) <= (size_t)WC_PTRDIFF_MAX - sizeof(Block),
+                 wc_min_block_sz_must_leave_block_overhead);
+WC_STATIC_ASSERT((WC_DEFAULT_BLOCK_SZ) <=
+                         (size_t)WC_PTRDIFF_MAX - sizeof(Block),
+                 wc_default_block_sz_must_leave_block_overhead);
+WC_STATIC_ASSERT(sizeof(Slot) <= (size_t)WC_PTRDIFF_MAX, slot_must_fit_ptrdiff);
+WC_STATIC_ASSERT((WC_MIN_INIT_CAP) <= WC_CAP_LIMIT,
+                 wc_min_init_cap_exceeds_hash_cap_limit);
+WC_STATIC_ASSERT((WC_DEFAULT_INIT_CAP) <= WC_CAP_LIMIT,
+                 wc_default_init_cap_exceeds_hash_cap_limit);
+WC_STATIC_ASSERT((WC_MIN_INIT_CAP) <= (size_t)WC_PTRDIFF_MAX / sizeof(Slot),
+                 wc_min_init_cap_table_must_fit_ptrdiff);
+WC_STATIC_ASSERT((WC_DEFAULT_INIT_CAP) <= (size_t)WC_PTRDIFF_MAX / sizeof(Slot),
+                 wc_default_init_cap_table_must_fit_ptrdiff);
+WC_STATIC_ASSERT(sizeof(struct wc) <= (size_t)WC_PTRDIFF_MAX,
+                 wc_must_fit_ptrdiff);
+WC_STATIC_ASSERT(sizeof(struct wc_stream) <= (size_t)WC_PTRDIFF_MAX,
+                 wc_stream_must_fit_ptrdiff);
+WC_STATIC_ASSERT((size_t)WC_PTRDIFF_MAX >=
+                         sizeof(struct wc_stream) + (size_t)MIN_WORD + 1u,
+                 wc_ptrdiff_max_too_small_for_min_word_stream);
+WC_STATIC_ASSERT((WC_MAX_WORD) <=
+                         (size_t)WC_PTRDIFF_MAX - sizeof(struct wc_stream) - 1u,
+                 wc_max_word_must_leave_stream_overhead);
+
+static void wc_alloc_state_init(wc_alloc_state *st)
+{
+    if (!st)
+        return;
+    st->bytes_used = 0;
+    st->bytes_limit = 0;
+    st->static_mode = 0;
+    st->sbuf = NULL;
+    st->sbuf_size = 0;
+    st->sbuf_used = 0;
+}
+
+static void wc_arena_init_empty(Arena *a)
+{
+    if (!a)
+        return;
+    a->head = NULL;
+    a->tail = NULL;
+    a->block_sz = 0;
+    a->blocks = 0;
+}
+
+static void wc_handle_init(wc *w)
+{
+    if (!w)
+        return;
+    w->tab = NULL;
+    w->cap = 0;
+    w->len = 0;
+    w->tot = 0;
+    w->maxw = 0;
+    w->strict_max_bytes = 0;
+    wc_arena_init_empty(&w->arena);
+    wc_alloc_state_init(&w->alloc);
+    w->seed = (wc_hash_t)0;
+    w->owns_self = 0;
+#if !WC_INTERNAL_BOOL(WC_STACK_BUFFER)
+    w->scanbuf = NULL;
+    w->scanbuf_size = 0;
+#endif
+    w->streams = NULL;
+}
+
+static void wc_slot_init(Slot *s)
+{
+    if (!s)
+        return;
+    s->word = NULL;
+    s->n = 0;
+    s->cnt = 0;
+    s->hash = (wc_hash_t)0;
+}
+
+static void wc_slots_init(Slot *tab, size_t cap)
+{
+    size_t i;
+
+    if (!tab)
+        return;
+    for (i = 0; i < cap; i++)
+        wc_slot_init(&tab[i]);
+}
 
 static void wc_stream_mark_detached(wc_stream *s)
 {
@@ -674,6 +843,8 @@ static void *wc_xmalloc_state(wc_alloc_state *st, size_t n)
 
     if (!st || n == 0)
         return NULL;
+    if (!wc_object_span_valid(n))
+        return NULL;
 
 #if WC_INTERNAL_BOOL(WC_NO_HEAP)
     /* No-heap builds support only static-buffer mode. */
@@ -707,11 +878,18 @@ static void *wc_xmalloc_state(wc_alloc_state *st, size_t n)
         size_t real;
         size_t new_used;
 
+        if (!wc_object_span_valid(st->sbuf_size) ||
+            !wc_object_span_valid(st->sbuf_used))
+            return NULL;
         if (add_overflows(pad, n))
             return NULL;
         real = pad + n;
+        if (!wc_object_span_valid(real))
+            return NULL;
 
         if (add_overflows(st->sbuf_used, real))
+            return NULL;
+        if (!wc_object_span_valid(st->sbuf_used + real))
             return NULL;
         if (st->sbuf_used + real > st->sbuf_size)
             return NULL;
@@ -740,6 +918,8 @@ static int wc_xdryrun_state(wc_alloc_state *st, size_t n)
 {
     if (!st || n == 0)
         return 0;
+    if (!wc_object_span_valid(n))
+        return 0;
 
 #if !WC_INTERNAL_BOOL(WC_NO_HEAP)
     if (!st->static_mode) {
@@ -766,11 +946,18 @@ static int wc_xdryrun_state(wc_alloc_state *st, size_t n)
         size_t real;
         size_t new_used;
 
+        if (!wc_object_span_valid(st->sbuf_size) ||
+            !wc_object_span_valid(st->sbuf_used))
+            return 0;
         if (add_overflows(pad, n))
             return 0;
         real = pad + n;
+        if (!wc_object_span_valid(real))
+            return 0;
 
         if (add_overflows(st->sbuf_used, real))
+            return 0;
+        if (!wc_object_span_valid(st->sbuf_used + real))
             return 0;
         if (st->sbuf_used + real > st->sbuf_size)
             return 0;
@@ -797,11 +984,10 @@ static int wc_static_layout_fits(size_t static_size,
     size_t arena_bytes;
     wc_alloc_state scratch;
 
-    if (add_overflows(sizeof(Block), block_sz))
+    if (!wc_add_object_span(sizeof(Block), block_sz, &arena_bytes))
         return 0;
-    arena_bytes = sizeof(Block) + block_sz;
 
-    wc_memset_internal(&scratch, 0, sizeof scratch);
+    wc_alloc_state_init(&scratch);
     scratch.bytes_used = static_reserve;
     scratch.bytes_limit = bytes_limit;
     scratch.static_mode = 1;
@@ -832,8 +1018,8 @@ static size_t wc_static_max_block_size(size_t static_size,
         return min_block_sz;
 
     hi = static_size - static_reserve;
-    if (hi > WC_SIZE_MAX - sizeof(Block))
-        hi = WC_SIZE_MAX - sizeof(Block);
+    if (hi > (size_t)WC_PTRDIFF_MAX - sizeof(Block))
+        hi = (size_t)WC_PTRDIFF_MAX - sizeof(Block);
 
     if (hi < lo || !wc_static_layout_fits(static_size,
                                           static_reserve,
@@ -887,9 +1073,8 @@ static int wc_static_choose_layout(size_t static_size,
         size_t candidate_block = *block_sz;
         size_t candidate_table_bytes;
 
-        if (mul_overflows(cap, sizeof(Slot)))
+        if (!wc_mul_object_span(cap, sizeof(Slot), &candidate_table_bytes))
             return 0;
-        candidate_table_bytes = cap * sizeof(Slot);
 
         if (!explicit_block_size) {
             candidate_block = wc_static_max_block_size(static_size,
@@ -900,7 +1085,7 @@ static int wc_static_choose_layout(size_t static_size,
                                                        scan_bytes);
         }
 
-        if (!add_overflows(sizeof(Block), candidate_block) &&
+        if (wc_object_span_valid(candidate_block) &&
             wc_static_layout_fits(static_size,
                                   static_reserve,
                                   bytes_limit,
@@ -967,9 +1152,8 @@ static Block *block_new(wc *w, size_t cap)
     Block *b;
     size_t total;
 
-    if (add_overflows(sizeof(Block), cap))
+    if (!wc_add_object_span(sizeof(Block), cap, &total))
         return NULL;
-    total = sizeof(Block) + cap;
 
     b = (Block *)wc_xmalloc(w, total);
     if (!b)
@@ -1033,7 +1217,8 @@ static int arena_tail_available(const Arena *a, size_t *out)
         return 0;
 
     cur = a->tail->cur;
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
+#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
+        WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)
     {
         const uintptr_t cur_addr = (uintptr_t)cur;
         pad = (size_t)((align - (cur_addr % align)) % align);
@@ -1061,13 +1246,11 @@ arena_new_block_allocation_size(const Arena *a, size_t sz, size_t *out)
 
     if (!a || !out)
         return 0;
-    if (add_overflows(sz, WC_ALIGN))
+    if (!wc_add_object_span(sz, WC_ALIGN, &need))
         return 0;
-    need = sz + WC_ALIGN;
     cap = need > a->block_sz ? need : a->block_sz;
-    if (add_overflows(sizeof(Block), cap))
+    if (!wc_add_object_span(sizeof(Block), cap, out))
         return 0;
-    *out = sizeof(Block) + cap;
     return 1;
 }
 
@@ -1092,10 +1275,13 @@ static void *arena_alloc(wc *w, size_t sz)
     WC_ASSERT(w != NULL);
     a = &w->arena;
     WC_ASSERT(a->tail != NULL);
+    if (!wc_object_span_valid(sz))
+        return NULL;
 
     {
         const char *cur = a->tail->cur;
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
+#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
+        WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)
         const uintptr_t cur_addr = (uintptr_t)cur;
         pad = (size_t)((align - (cur_addr % align)) % align);
 #else
@@ -1119,9 +1305,8 @@ static void *arena_alloc(wc *w, size_t sz)
     if (w->alloc.static_mode)
         return NULL;
 
-    if (add_overflows(sz, align))
+    if (!wc_add_object_span(sz, align, &need))
         return NULL;
-    need = sz + align;
     cap = need > a->block_sz ? need : a->block_sz;
 
     b = block_new(w, cap);
@@ -1136,7 +1321,8 @@ static void *arena_alloc(wc *w, size_t sz)
        preserve WC_ALIGN even if the header offset is not aligned. */
     {
         const char *cur = b->cur;
-#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR)
+#if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
+        WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)
         const uintptr_t cur_addr = (uintptr_t)cur;
         pad = (size_t)((align - (cur_addr % align)) % align);
 #else
@@ -1322,11 +1508,10 @@ static int tab_grow(wc *w)
     if (!wc_cap_valid(nc))
         return -1;
 
-    if (mul_overflows(nc, sizeof(Slot)))
+    if (!wc_mul_object_span(nc, sizeof(Slot), &alloc))
         return -1;
-    alloc = nc * sizeof(Slot);
 
-    /* NOTE: open-addressing depends on (cap-1) masking. Changing cap requires
+        /* NOTE: open-addressing depends on (cap-1) masking. Changing cap requires
        a full rehash into a new table. Do NOT "grow in place" unless you
        rehash (otherwise lookups break). */
 
@@ -1354,7 +1539,7 @@ static int tab_grow(wc *w)
             ns = (Slot *)WC_MALLOC(alloc);
             if (!ns)
                 return -1;
-            wc_memset_internal(ns, 0, alloc);
+            wc_slots_init(ns, nc);
             manual_alloc = 1;
         }
     }
@@ -1364,7 +1549,7 @@ static int tab_grow(wc *w)
         ns = (Slot *)wc_xmalloc(w, alloc);
         if (!ns)
             return -1;
-        wc_memset_internal(ns, 0, alloc);
+        wc_slots_init(ns, nc);
     }
 
     for (i = 0; i < w->cap; i++) {
@@ -1510,9 +1695,8 @@ static int tab_insert(wc *w, const char *word, size_t n, wc_hash_t h)
         }
 
         /* Allocate and insert. */
-        if (add_overflows(n, 1))
+        if (!wc_add_object_span(n, 1u, &alloc))
             return -1;
-        alloc = n + 1;
 
         if (w->len == WC_SIZE_MAX || w->tot == WC_SIZE_MAX)
             return -1;
@@ -1679,7 +1863,13 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
             goto fail;
         }
         if (lim_static_buf && lim_static_size) {
-#if !WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
+            if (!wc_object_span_valid(lim_static_size)) {
+                err = WC_EBADLIMITS;
+                WC_SET_ERRNO(EINVAL);
+                goto fail;
+            }
+#if !(WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) &&              \
+      WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)) && \
         !WC_INTERNAL_BOOL(WC_TRUST_STATIC_BUFFER_ALIGNMENT)
             err = WC_EBADLIMITS;
             WC_SET_ERRNO(EINVAL);
@@ -1704,7 +1894,7 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
 
     {
         wc_limits lim_tune;
-        wc_memset_internal(&lim_tune, 0, sizeof lim_tune);
+        wc_limits_init(&lim_tune);
         lim_tune.max_bytes = lim_max_bytes;
         lim_tune.init_cap = lim_init_cap;
         lim_tune.block_size = lim_block_size;
@@ -1773,24 +1963,27 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
     ** - In dynamic mode: if max_bytes is set, ensure it can cover minimal
     **   internal structures (table + first arena block + optional scanbuf).
     */
-    if (mul_overflows(init_cap, sizeof(Slot))) {
-        err = WC_EBADLIMITS;
-        WC_SET_ERRNO(EINVAL);
-        goto fail;
-    }
-    table_bytes = init_cap * sizeof(Slot);
-
-    if (add_overflows(sizeof(Block), block_sz)) {
+    if (!wc_mul_object_span(init_cap, sizeof(Slot), &table_bytes)) {
         err = WC_EBADLIMITS;
         WC_SET_ERRNO(EINVAL);
         goto fail;
     }
 
     {
-        size_t arena_bytes = sizeof(Block) + block_sz;
+        size_t arena_bytes = 0;
         size_t layout_scan_bytes = 0;
+        if (!wc_add_object_span(sizeof(Block), block_sz, &arena_bytes)) {
+            err = WC_EBADLIMITS;
+            WC_SET_ERRNO(EINVAL);
+            goto fail;
+        }
 #if !WC_INTERNAL_BOOL(WC_STACK_BUFFER)
         scan_bytes = runtime_max_word;
+        if (!wc_object_span_valid(scan_bytes)) {
+            err = WC_EBADLIMITS;
+            WC_SET_ERRNO(EINVAL);
+            goto fail;
+        }
         layout_scan_bytes = scan_bytes;
 #endif
 
@@ -1810,8 +2003,12 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
                 WC_SET_ERRNO(EINVAL);
                 goto fail;
             }
-            arena_bytes = sizeof(Block) + block_sz;
-            wc_memset_internal(&scratch, 0, sizeof scratch);
+            if (!wc_add_object_span(sizeof(Block), block_sz, &arena_bytes)) {
+                err = WC_EBADLIMITS;
+                WC_SET_ERRNO(EINVAL);
+                goto fail;
+            }
+            wc_alloc_state_init(&scratch);
             scratch.bytes_used = static_reserve;
             scratch.bytes_limit = bytes_limit;
             scratch.static_mode = 1;
@@ -1862,18 +2059,11 @@ badlimits:
     }
 #endif
 
-    wc_memset_internal(w, 0, sizeof *w);
+    wc_handle_init(w);
     w->owns_self = owns_self;
     w->maxw = runtime_max_word;
     w->strict_max_bytes = lim_strict_max_bytes ? 1 : 0;
-
-    /* Allocator state defaults */
-    w->alloc.bytes_used = 0;
     w->alloc.bytes_limit = bytes_limit;
-    w->alloc.static_mode = 0;
-    w->alloc.sbuf = NULL;
-    w->alloc.sbuf_size = 0;
-    w->alloc.sbuf_used = 0;
 
     if (static_mode) {
         w->alloc.static_mode = 1;
@@ -1904,7 +2094,7 @@ badlimits:
         goto fail;
     }
 
-    wc_memset_internal(w->tab, 0, table_bytes);
+    wc_slots_init(w->tab, init_cap);
     w->cap = init_cap;
 
     /* Initialize arena. */
@@ -2000,6 +2190,18 @@ void wc_close(wc *w)
 
 /* --- Word insertion and scanning -------------------------------------- */
 
+static int wc_insert_prepared(wc *w, const char *word, size_t n)
+{
+    wc_hash_t h = wc_hash_bytes(word, n, w->seed);
+    const int trc = tab_insert(w, word, n, h);
+
+    if (trc == 0)
+        return WC_OK;
+    if (trc == -2)
+        return WC_ERROR;
+    return WC_NOMEM;
+}
+
 /* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
 static int
 wc_add_impl(wc *w,
@@ -2007,8 +2209,6 @@ wc_add_impl(wc *w,
             size_t len,
             int normalize) /* NOLINT(bugprone-easily-swappable-parameters) */
 {
-    wc_hash_t h;
-    const char *use_word;
     size_t n;
 
     if (!wc_ready(w) || (!word && len > 0))
@@ -2033,37 +2233,26 @@ wc_add_impl(wc *w,
         }
     }
 
-#if WC_INTERNAL_BOOL(WC_STACK_BUFFER)
-    char local[WC_MAX_WORD];
-    char *norm_buf = local;
-#else
-    char *norm_buf = w->scanbuf;
-    WC_ASSERT(norm_buf != NULL);
-#endif
-
     if (normalize) {
         size_t i;
+#if WC_INTERNAL_BOOL(WC_STACK_BUFFER)
+        char local[WC_MAX_WORD];
+        char *norm_buf = local;
+#else
+        char *norm_buf = w->scanbuf;
+        WC_ASSERT(norm_buf != NULL);
+#endif
+
         for (i = 0; i < n; i++) {
             unsigned char c = (unsigned char)word[i];
             if (wc_is_word_byte(c))
                 c = wc_tolower_byte(c);
             norm_buf[i] = (char)c;
         }
-        use_word = norm_buf;
-    } else {
-        use_word = word;
+        return wc_insert_prepared(w, norm_buf, n);
     }
 
-    /* cppcheck-suppress uninitvar */
-    h = wc_hash_bytes(use_word, n, w->seed);
-    {
-        const int trc = tab_insert(w, use_word, n, h);
-        if (trc == 0)
-            return WC_OK;
-        if (trc == -2)
-            return WC_ERROR;
-        return WC_NOMEM;
-    }
+    return wc_insert_prepared(w, word, n);
 }
 
 int wc_add(wc *w, const char *word)
@@ -2206,8 +2395,8 @@ static int wc_qsort_cmp_words(
 }
 #endif
 
-/* For min-heap: returns 1 if a is strictly worse (smaller count or
-   same count but lexicographically larger). */
+/* For min-heap: returns 1 if a is strictly worse (smaller count or same count
+   but bytewise larger). */
 static int wc_word_is_worse(const wc_word *a, const wc_word *b)
 {
     if (a->count != b->count)
@@ -2364,9 +2553,8 @@ int wc_results(const wc *w, wc_word **out, size_t *n)
     if (w->len == 0)
         return WC_OK;
 
-    if (mul_overflows(w->len, sizeof *arr))
+    if (!wc_mul_object_span(w->len, sizeof *arr, &alloc))
         return WC_NOMEM;
-    alloc = w->len * sizeof *arr;
     arr = (wc_word *)WC_MALLOC(alloc);
     if (!arr)
         return WC_NOMEM;
@@ -2437,7 +2625,7 @@ wc_topn_fill(const wc *w, size_t n, wc_word *out, size_t out_cap, size_t *out_n)
         }
     }
     WC_ASSERT(heap_sz <= target);
-    /* Sort for deterministic output (count desc, lex asc). */
+    /* Sort for deterministic output (count desc, bytewise word asc). */
     wc_sort_words(out, heap_sz);
     *out_n = heap_sz;
 
@@ -2458,6 +2646,7 @@ int wc_topn(const wc *w, size_t n, wc_word **out, size_t *out_n)
     return WC_NOMEM;
 #else
     wc_word *heap;
+    size_t alloc;
     size_t target;
     size_t filled = 0;
     int rc;
@@ -2474,9 +2663,9 @@ int wc_topn(const wc *w, size_t n, wc_word **out, size_t *out_n)
 
     target = n < w->len ? n : w->len;
 
-    if (mul_overflows(target, sizeof *heap))
+    if (!wc_mul_object_span(target, sizeof *heap, &alloc))
         return WC_NOMEM;
-    heap = (wc_word *)WC_MALLOC(target * sizeof *heap);
+    heap = (wc_word *)WC_MALLOC(alloc);
     if (!heap)
         return WC_NOMEM;
 
@@ -2712,22 +2901,24 @@ const char *wc_version(void)
 
 /* --- Build configuration introspection -------------------------------- */
 
-static const wc_build_config wc_build_cfg = { sizeof(wc_build_config),
-                                              WC_VERSION_NUMBER,
-                                              WC_MAX_WORD,
-                                              WC_MIN_INIT_CAP,
-                                              WC_MIN_BLOCK_SZ,
-                                              WC_STACK_BUFFER ? 1 : 0,
-                                              WC_STDC_HOSTED ? 1 : 0,
-                                              WC_USE_LIBC_STRING ? 1 : 0,
-                                              WC_USE_LIBC_QSORT ? 1 : 0,
-                                              WC_HAVE_ERRNO ? 1 : 0,
-                                              WC_NO_HEAP ? 1 : 0,
-                                              WC_HASH_STRONG ? 1 : 0,
-                                              WC_HAVE_UINTPTR ? 1 : 0,
-                                              WC_TRUST_STATIC_BUFFER_ALIGNMENT
-                                                      ? 1
-                                                      : 0 };
+static const wc_build_config wc_build_cfg = {
+    .struct_size = sizeof(wc_build_config),
+    .version_number = WC_VERSION_NUMBER,
+    .max_word = WC_MAX_WORD,
+    .min_init_cap = WC_MIN_INIT_CAP,
+    .min_block_sz = WC_MIN_BLOCK_SZ,
+    .stack_buffer = WC_STACK_BUFFER ? 1 : 0,
+    .hosted = WC_STDC_HOSTED ? 1 : 0,
+    .use_libc_string = WC_USE_LIBC_STRING ? 1 : 0,
+    .use_libc_qsort = WC_USE_LIBC_QSORT ? 1 : 0,
+    .have_errno = WC_HAVE_ERRNO ? 1 : 0,
+    .no_heap = WC_NO_HEAP ? 1 : 0,
+    .hash_strong = WC_HASH_STRONG ? 1 : 0,
+    .have_uintptr = WC_HAVE_UINTPTR ? 1 : 0,
+    .trust_static_buffer_alignment = WC_TRUST_STATIC_BUFFER_ALIGNMENT ? 1 : 0,
+    .linear_uintptr_alignment = WC_LINEAR_UINTPTR_ALIGNMENT ? 1 : 0,
+    .stack_max_word = WC_STACK_MAX_WORD
+};
 
 const wc_build_config *wc_build_info(void)
 {
@@ -2756,13 +2947,11 @@ wc_stream_requirements(const wc *w, size_t *cap_out, size_t *bytes_out)
     if (cap < 4)
         cap = 4;
 
-    if (add_overflows(cap, 1))
+    if (!wc_add_object_span(cap, 1, &buf_bytes))
         return 0;
-    buf_bytes = cap + 1;
 
-    if (add_overflows(sizeof(struct wc_stream), buf_bytes))
+    if (!wc_add_object_span(sizeof(struct wc_stream), buf_bytes, &total))
         return 0;
-    total = sizeof(struct wc_stream) + buf_bytes;
 
     *cap_out = cap;
     *bytes_out = total;
@@ -2806,14 +2995,17 @@ wc_stream *wc_stream_open(wc *w, int *err_out)
             *err_out = WC_NOMEM;
         return NULL;
     }
-    wc_memset_internal(s, 0, need);
 
+    s->w = NULL;
+    s->prev = NULL;
+    s->next = NULL;
     s->cap = cap;
     s->len = 0;
     s->finished = 0;
     s->finish_rc = WC_OK;
     s->owns_self = 1;
     s->buf = s->storage;
+    wc_memset_internal(s->storage, 0, cap + 1u);
     s->buf[0] = '\0';
     wc_stream_link(w, s);
     return s;
