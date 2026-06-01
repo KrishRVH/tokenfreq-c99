@@ -300,7 +300,9 @@ typedef union {
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define WC_ALIGNOF(T) _Alignof(T)
-#elif defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)
+#elif defined(_MSC_VER)
+#define WC_ALIGNOF(T) __alignof(T)
+#elif defined(__GNUC__) || defined(__clang__)
 #define WC_ALIGNOF(T) __alignof__(T)
 #else
 #define WC_ALIGNOF(T)   \
