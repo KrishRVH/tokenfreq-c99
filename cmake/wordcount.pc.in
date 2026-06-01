@@ -1,7 +1,7 @@
-prefix=@CMAKE_INSTALL_PREFIX@
+prefix=@WC_PKGCONFIG_PREFIX@
 exec_prefix=${prefix}
-libdir=@CMAKE_INSTALL_FULL_LIBDIR@
-includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@/wordcount
+libdir=@WC_PKGCONFIG_LIBDIR@
+includedir=@WC_PKGCONFIG_INCLUDEDIR@
 
 Name: wordcount
 Description: C99 word frequency counter (small, robust)

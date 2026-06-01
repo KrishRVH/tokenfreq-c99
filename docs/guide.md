@@ -15,7 +15,7 @@ int rc = WC_OK;
 wc *w = wc_open_ex(0, &lim, &rc);
 if (!w) { /* handle rc */ }
 
-wc_add_norm_n(w, "Hello", 5); /* case-folded add */
+wc_add_norm_n(w, "Hello", 5); /* normalized add; does not tokenize */
 wc_scan(w, "more text here", 15);
 
 wc_word *out = NULL;
@@ -40,8 +40,20 @@ wc_stream_close(s);
 
 - `wc_stream_finish` is idempotent; after it runs, further scans return the
   same code as `wc_stream_finish` (with `consumed_out` left at 0).
+- `wc_stream_close` does not flush a trailing word. Call `wc_stream_finish`
+  before closing when the final token should be counted.
+- If the parent `wc` is closed first, open streams are detached: later
+  scan/finish calls return `WC_ERROR`, and `wc_stream_close` remains safe.
 - With `WC_STREAM_REUSE_SCANBUF=1`, only one stream may be open per `wc`; other
   scan APIs return `WC_EBUSY` while the stream is active.
+- `wc_stream_open_inplace` storage is caller-owned and must remain valid for
+  every call that uses the stream pointer, including `wc_stream_close`. If the
+  parent `wc` is closed first, the library holds no further references to that
+  storage; callers may reuse it only if they will not call stream APIs with that
+  pointer again. It must be separate from the parent `wc`, its internal
+  allocations, and active streams. Builds without `uintptr_t` always reject
+  inplace stream storage with `WC_EBADLIMITS`, because non-overlap cannot be
+  verified.
 
 ## Static Buffer Setup
 
@@ -59,10 +71,15 @@ wc *w = wc_open_ex(64, &lim, NULL);
 
 Preconditions:
 
-- `static_buf` must meet `WC_ALIGN`; if `uintptr_t` is unavailable, set
-  `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` only when the caller guarantees this.
-- If `handle_buf` aliases `static_buf`, it must start at `static_buf` and its
-  footprint counts against `static_size`.
+- `static_buf` must meet the library's internal alignment requirement; use
+  `WC_STATIC_BUFFER` for portable static-buffer alignment. If `uintptr_t` is
+  unavailable, set `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` only when the caller
+  guarantees alignment for static/handle buffers. In that trust mode,
+  misalignment is not reliably rejected at runtime.
+- If `handle_buf` shares static storage, it must be exactly equal to
+  `static_buf`; its aligned footprint counts against `static_size`.
+- Partial overlap between `handle_buf` and `static_buf` is invalid. Separate
+  non-overlapping buffers are allowed when the build can prove non-overlap.
 
 ## Budgets and Strict Mode
 
@@ -70,14 +87,20 @@ Preconditions:
   (`WC_STACK_BUFFER=0`); results arrays and stream objects are excluded.
 - `strict_max_bytes=1` forbids any transient peak above `max_bytes` during
   rehash; failures return `WC_NOMEM`.
+- `wc_reserve` is a best-effort preflight/growth helper. It can reduce early
+  `WC_NOMEM`, but callers must still handle `WC_NOMEM` from inserts and scans.
 
 ## Freestanding / Custom Builds
 
 - Libc-light: `-DWC_STDC_HOSTED=0 -DWC_USE_LIBC_STRING=0 -DWC_USE_LIBC_QSORT=0
-  -DWC_HAVE_ERRNO=0`.
+  -DWC_HAVE_ERRNO=0 -DWC_OMIT_ASSERT=1`. This profile is still heap-enabled and
+  requires `<stdlib.h>` allocator support or custom
+  `WC_MALLOC`/`WC_REALLOC`/`WC_FREE`; use the heapless profile for libc-free
+  builds.
 - Heapless: `-DWC_NO_HEAP=1` plus a static buffer for both handle and storage.
-- Custom integer types: define `WC_U32_T` / `WC_U64_T` if `<stdint.h>` is
-  unavailable.
+- Custom integer types: define `WC_U32_T` / `WC_U64_T`; also define
+  `WC_PTRDIFF_MAX` and `WC_HAVE_UINTPTR=0` if `<stdint.h>`/`PTRDIFF_MAX` or
+  `uintptr_t` is unavailable.
 
 ## Error Handling Patterns
 

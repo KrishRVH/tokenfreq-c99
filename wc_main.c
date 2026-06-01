@@ -5,35 +5,43 @@
 **
 ** DESIGN
 **
-**   Uses memory-mapped I/O for zero-copy file access, enabling
-**   processing of files larger than physical RAM. Platform-specific
-**   code is isolated in the os_* functions.
-**
-**   Stdin is processed via the library's streaming API (wc_stream_*),
-**   keeping host memory bounded and ensuring tokenization stays in sync
-**   with wc_scan().
+**   All input is processed via the library's streaming API (wc_stream_*),
+**   keeping input buffering bounded and ensuring tokenization stays in sync
+**   with wc_scan(). Total memory remains proportional to unique words and
+**   result arrays unless allocation limits are configured. The CLI
+**   intentionally avoids memory-mapped I/O: portable C cannot reliably recover
+**   if a mapped file is truncated during scanning.
 **
 **   NOTE ABOUT BUILD MISMATCHES
 **
 **   wc_main.c is compiled against wordcount.h but may be linked against a
-**   separately-built wordcount.c with different build macros. The stdin path
-**   uses the library streaming API (wc_stream_*), avoiding duplicated
+**   separately-built wordcount.c with different build macros. All input paths
+**   use the library streaming API (wc_stream_*), avoiding duplicated
 **   tokenization logic in the CLI.
 **
-** Usage: wc [file ...]
-**   Reads stdin if no files given. Top 10 to stdout, summary to stderr.
+** Usage: wc [OPTIONS] [FILE ...]
+**   Reads stdin if no files are given. File operands are aggregated into one
+**   result set. Table summaries print to stdout, TSV summaries to stderr,
+**   and JSON embeds its summary.
 **
 ** Environment:
-**   WC_MAX_BYTES  - Optional hard cap on internal heap usage for
-**                   the wc object, in bytes (e.g. "8388608" for 8MB).
-**                   Must be a non-negative decimal integer.
+**   WC_MAX_BYTES  - Optional steady-state allocation budget for internal
+**                   table/arena/scan-buffer storage, in bytes (e.g.
+**                   "8388608" for 8MB). Use --strict-max-bytes for a hard peak
+**                   cap. Must be a non-negative decimal integer.
 */
 #ifndef WC_NO_HOSTED_MAIN
 
 #include "wordcount.h"
 
+#if WC_BOOL(WC_NO_HEAP) || !WC_BOOL(WC_STDC_HOSTED)
+#error "wc_main.c requires a hosted heap-enabled wordcount build; define WC_NO_HOSTED_MAIN to omit the CLI main."
+#endif
+
 #include <errno.h>
-#include <fcntl.h>
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +49,12 @@
 #include <locale.h>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <fcntl.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <io.h>
 #include <wchar.h>
 
@@ -51,12 +64,26 @@ static wchar_t *utf8_to_wide(const char *utf8);
 #endif
 
 #define TOPN 25
-#define STDIN_CHUNK 65536
+#if WC_PTRDIFF_MAX < 1
+#error "WC_PTRDIFF_MAX must be positive."
+#endif
+#define WC_CLI_MAX_CHUNK 4096u
+#define STDIN_CHUNK                                      \
+    (((size_t)WC_PTRDIFF_MAX < (size_t)WC_CLI_MAX_CHUNK) \
+             ? (size_t)WC_PTRDIFF_MAX                    \
+             : ((WC_SIZE_MAX < (size_t)WC_CLI_MAX_CHUNK) \
+                        ? WC_SIZE_MAX                    \
+                        : (size_t)WC_CLI_MAX_CHUNK))
+#define TABLE_WORD_WIDTH_LIMIT 4096u
+
+typedef char wc_cli_chunk_must_be_positive[(STDIN_CHUNK > 0u) ? 1 : -1];
+typedef char wc_cli_chunk_must_fit_ptrdiff
+        [(STDIN_CHUNK <= (size_t)WC_PTRDIFF_MAX) ? 1 : -1];
+typedef char wc_cli_chunk_must_fit_size[(STDIN_CHUNK <= WC_SIZE_MAX) ? 1 : -1];
 
 #ifndef EFBIG
 #define EFBIG ERANGE
 #endif
-
 typedef enum {
     FORMAT_TABLE,
     FORMAT_TSV,
@@ -78,7 +105,6 @@ typedef struct {
     int has_max_len;
     size_t max_word;
     int has_max_word;
-    int no_mmap;
     int show_version;
     int show_help;
     size_t max_bytes;
@@ -91,7 +117,7 @@ typedef struct {
 } cli_opts;
 
 typedef struct {
-    size_t bytes_processed;
+    uintmax_t bytes_processed;
     size_t files_processed;
     size_t files_failed;
 } run_stats;
@@ -160,42 +186,92 @@ static int parse_wc_limits_from_env(wc_limits *lim)
     return 1;
 }
 
-static void print_usage(void)
+static int add_uintmax_checked(uintmax_t *acc, uintmax_t n)
 {
-    (void)fprintf(stdout,
-                  "Usage: wc [OPTIONS] [FILE|-]\n"
-                  "  Reads FILEs (or stdin) and reports word frequencies.\n"
-                  "\n"
-                  "Output:\n"
-                  "  -n, --top N           Show top N words (default %d)\n"
-                  "      --all             Show all unique words\n"
-                  "      --format {table,tsv,json}\n"
-                  "      --summary         Print totals after the list\n"
-                  "  -q, --quiet           Summary only (implies --summary)\n"
-                  "      --color {auto,always,never}\n"
-                  "      --no-color        Disable color entirely\n"
-                  "\n"
-                  "Parsing:\n"
-                  "      --min-len N       Exclude words shorter than N\n"
-                  "      --max-len N       Exclude words longer than N\n"
-                  "      --max-word N      Set library max_word limit\n"
-                  "\n"
-                  "Memory:\n"
-                  "      --max-bytes N     Limit internal bytes (overrides "
-                  "WC_MAX_BYTES)\n"
-                  "      --strict-max-bytes Enforce a hard cap (no transient "
-                  "spikes)\n"
-                  "      --no-mmap         Stream files instead of mmap\n"
-                  "\n"
-                  "Other:\n"
-                  "      --version         Print version and exit\n"
-                  "  -h, --help            Show this help\n"
-                  "\n"
-                  "Examples:\n"
-                  "  wc book.txt\n"
-                  "  wc -n 50 --format tsv book.txt\n"
-                  "  wc --max-bytes 262144 --strict-max-bytes huge.txt\n",
-                  TOPN);
+    if (!acc)
+        return -1;
+    if (*acc > UINTMAX_MAX - (uintmax_t)n) {
+        errno = EFBIG;
+        return -1;
+    }
+    *acc += (uintmax_t)n;
+    return 0;
+}
+
+static int cli_fprintf(FILE *out, const char *fmt, ...)
+{
+    int rc;
+    va_list ap;
+
+    if (!out || !fmt)
+        return -1;
+
+    va_start(ap, fmt);
+    rc = vfprintf(out, fmt, ap);
+    va_end(ap);
+    return (rc < 0) ? -1 : 0;
+}
+
+static int cli_fputs(FILE *out, const char *s)
+{
+    if (!out || !s)
+        return -1;
+    return (fputs(s, out) == EOF) ? -1 : 0;
+}
+
+static int cli_putc(FILE *out, int ch)
+{
+    if (!out)
+        return -1;
+    return (fputc(ch, out) == EOF) ? -1 : 0;
+}
+
+static int cli_flush(FILE *out)
+{
+    if (!out)
+        return -1;
+    if (fflush(out) == EOF)
+        return -1;
+    return ferror(out) ? -1 : 0;
+}
+
+static int print_usage(FILE *out)
+{
+    return cli_fprintf(
+            out,
+            "Usage: wc [OPTIONS] [FILE ...]\n"
+            "  Reads FILEs, or stdin when no FILEs are given, and reports "
+            "word frequencies.\n"
+            "\n"
+            "Output:\n"
+            "  -n, --top N           Show top N words (default %d)\n"
+            "      --all             Show all unique words\n"
+            "      --format {table,tsv,json}\n"
+            "      --summary         Print totals (default; explicit no-op)\n"
+            "  -q, --quiet           Summary only (implies --summary)\n"
+            "      --color {auto,always,never}\n"
+            "      --no-color        Disable color entirely\n"
+            "\n"
+            "Parsing:\n"
+            "      --min-len N       Exclude words shorter than N\n"
+            "      --max-len N       Exclude words longer than N\n"
+            "      --max-word N      Set library max_word limit\n"
+            "\n"
+            "Memory:\n"
+            "      --max-bytes N     Budget internal bytes (overrides "
+            "WC_MAX_BYTES)\n"
+            "      --strict-max-bytes Enforce a hard cap (no transient "
+            "spikes)\n"
+            "\n"
+            "Other:\n"
+            "      --version         Print version and exit\n"
+            "  -h, --help            Show this help\n"
+            "\n"
+            "Examples:\n"
+            "  wc book.txt\n"
+            "  wc -n 50 --format tsv book.txt\n"
+            "  wc --max-bytes 262144 --strict-max-bytes huge.txt\n",
+            TOPN);
 }
 
 static int
@@ -214,7 +290,6 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
     opts->has_max_len = 0;
     opts->max_word = 0;
     opts->has_max_word = 0;
-    opts->no_mmap = 0;
     opts->show_version = 0;
     opts->show_help = 0;
     opts->max_bytes = 0;
@@ -229,6 +304,8 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
         const char *arg = argv[i];
         if (arg[0] != '-')
             break;
+        if (strcmp(arg, "-") == 0)
+            break;
         if (strcmp(arg, "--") == 0) {
             i++;
             break;
@@ -240,8 +317,6 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
             opts->show_version = 1;
             i++;
             break;
-        } else if (strcmp(arg, "--no-mmap") == 0) {
-            opts->no_mmap = 1;
         } else if (strcmp(arg, "--all") == 0) {
             opts->show_all = 1;
         } else if (strcmp(arg, "--summary") == 0) {
@@ -357,40 +432,9 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
     return 0;
 }
 
-/* stdin streaming is now implemented by the library via wc_stream_* */
-
-/* --- Platform abstraction for memory-mapped files --------------------- */
+/* --- Windows UTF-8 argument/path helpers ------------------------------ */
 
 #ifdef _WIN32
-
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <shellapi.h>
-#include <fcntl.h>
-#include <io.h>
-
-typedef struct {
-    void *data;
-    size_t size;
-    HANDLE hFile;
-    HANDLE hMap;
-} MappedFile;
-
-static void set_errno_from_win32(void)
-{
-    DWORD err = GetLastError();
-    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-        errno = ENOENT;
-    } else if (err == ERROR_ACCESS_DENIED) {
-        errno = EACCES;
-    } else if (err == ERROR_NOT_ENOUGH_MEMORY || err == ERROR_OUTOFMEMORY) {
-        errno = ENOMEM;
-    } else if (err == ERROR_NO_UNICODE_TRANSLATION) {
-        errno = EINVAL;
-    } else {
-        errno = EIO;
-    }
-}
 
 /* Convert UTF-8 path to UTF-16; sets errno precisely on failure. */
 static wchar_t *utf8_to_wide(const char *utf8)
@@ -506,264 +550,18 @@ static void win32_free_args_utf8(char **argv, int argc)
     free(argv);
 }
 
-static int os_map(MappedFile *mf, const char *path)
-{
-    LARGE_INTEGER sz;
-    wchar_t *wpath;
-
-    if (!mf || !path) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    memset(mf, 0, sizeof *mf);
-    mf->hFile = INVALID_HANDLE_VALUE;
-    mf->hMap = NULL;
-
-    wpath = utf8_to_wide(path);
-    if (!wpath)
-        return -1;
-
-    mf->hFile = CreateFileW(wpath,
-                            GENERIC_READ,
-                            FILE_SHARE_READ,
-                            NULL,
-                            OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL,
-                            NULL);
-    free(wpath);
-
-    if (mf->hFile == INVALID_HANDLE_VALUE) {
-        set_errno_from_win32();
-        return -1;
-    }
-
-    if (!GetFileSizeEx(mf->hFile, &sz)) {
-        set_errno_from_win32();
-        CloseHandle(mf->hFile);
-        mf->hFile = INVALID_HANDLE_VALUE;
-        return -1;
-    }
-
-    if (sz.QuadPart == 0) {
-        CloseHandle(mf->hFile);
-        mf->hFile = INVALID_HANDLE_VALUE;
-        return 0;
-    }
-
-    if (sz.QuadPart < 0 ||
-        (unsigned long long)sz.QuadPart > (unsigned long long)SIZE_MAX) {
-        CloseHandle(mf->hFile);
-        mf->hFile = INVALID_HANDLE_VALUE;
-        errno = EFBIG;
-        return -1;
-    }
-
-    mf->hMap = CreateFileMappingW(mf->hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!mf->hMap) {
-        set_errno_from_win32();
-        CloseHandle(mf->hFile);
-        mf->hFile = INVALID_HANDLE_VALUE;
-        return -1;
-    }
-
-    mf->data = MapViewOfFile(mf->hMap, FILE_MAP_READ, 0, 0, 0);
-    if (!mf->data) {
-        set_errno_from_win32();
-        CloseHandle(mf->hMap);
-        CloseHandle(mf->hFile);
-        mf->hMap = NULL;
-        mf->hFile = INVALID_HANDLE_VALUE;
-        return -1;
-    }
-
-    mf->size = (size_t)sz.QuadPart;
-    return 0;
-}
-
-static void os_unmap(MappedFile *mf)
-{
-    if (!mf)
-        return;
-
-    if (mf->data)
-        UnmapViewOfFile(mf->data);
-    if (mf->hMap)
-        CloseHandle(mf->hMap);
-    if (mf->hFile != INVALID_HANDLE_VALUE)
-        CloseHandle(mf->hFile);
-
-    memset(mf, 0, sizeof *mf);
-    mf->hFile = INVALID_HANDLE_VALUE;
-}
-
-#else /* POSIX */
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-typedef struct {
-    void *data;
-    size_t size;
-    int fd;
-} MappedFile;
-
-static int os_map(MappedFile *mf, const char *path)
-{
-    struct stat st;
-    int saved_errno;
-
-    if (!mf || !path) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    memset(mf, 0, sizeof *mf);
-    mf->fd = -1;
-
-#ifdef O_CLOEXEC
-    mf->fd = open(path, O_RDONLY | O_CLOEXEC);
-#else
-    mf->fd = open(path, O_RDONLY);
-#endif
-    if (mf->fd < 0)
-        return -1;
-
-#if !defined(O_CLOEXEC) && defined(FD_CLOEXEC)
-    /* Best-effort fallback; ignore failures. */
-    (void)fcntl(mf->fd, F_SETFD, FD_CLOEXEC);
-#endif
-
-    if (fstat(mf->fd, &st) < 0) {
-        saved_errno = errno;
-        close(mf->fd);
-        mf->fd = -1;
-        errno = saved_errno;
-        return -1;
-    }
-
-    if (st.st_size < 0) {
-        close(mf->fd);
-        mf->fd = -1;
-        errno = EFBIG;
-        return -1;
-    }
-
-    if (st.st_size == 0) {
-        close(mf->fd);
-        mf->fd = -1;
-        return 0;
-    }
-
-    if ((off_t)(size_t)st.st_size != st.st_size) {
-        close(mf->fd);
-        mf->fd = -1;
-        errno = EFBIG;
-        return -1;
-    }
-
-    mf->data =
-            mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, mf->fd, 0);
-    if (mf->data == MAP_FAILED) {
-        saved_errno = errno;
-        mf->data = NULL;
-        close(mf->fd);
-        mf->fd = -1;
-        errno = saved_errno;
-        return -1;
-    }
-
-#ifdef MADV_SEQUENTIAL
-    (void)madvise(mf->data, (size_t)st.st_size, MADV_SEQUENTIAL);
-#endif
-
-    mf->size = (size_t)st.st_size;
-    return 0;
-}
-
-static void os_unmap(MappedFile *mf)
-{
-    if (!mf)
-        return;
-
-    if (mf->data && mf->size > 0)
-        munmap(mf->data, mf->size);
-    if (mf->fd >= 0)
-        close(mf->fd);
-
-    memset(mf, 0, sizeof *mf);
-    mf->fd = -1;
-}
-
 #endif /* _WIN32 */
 
 /* --- Processing -------------------------------------------------------- */
 
-static int process_file_streaming(wc *w, const char *path, run_stats *stats);
-
-static int process_mapped(wc *w,
-                          const char *data,
-                          size_t size,
-                          const char *name,
-                          run_stats *stats)
-{
-    int rc = wc_scan(w, data, size);
-    if (rc != WC_OK) {
-        (void)fprintf(stderr, "wc: %s: %s\n", name, wc_errstr(rc));
-        return -1;
-    }
-    if (stats)
-        stats->bytes_processed += size;
-    return 0;
-}
-
-static int
-process_file(wc *w, const char *path, int allow_mmap, run_stats *stats)
-{
-    MappedFile mf;
-    int rc = -1;
-
-    memset(&mf, 0, sizeof mf);
-
-    if (!allow_mmap || os_map(&mf, path) < 0) {
-        rc = process_file_streaming(w, path, stats);
-        if (stats) {
-            if (rc == 0)
-                stats->files_processed++;
-            else
-                stats->files_failed++;
-        }
-        return rc;
-    }
-
-    if (mf.size == 0) {
-        rc = 0;
-        goto cleanup;
-    }
-
-    rc = process_mapped(w, (const char *)mf.data, mf.size, path, stats);
-
-cleanup:
-    os_unmap(&mf);
-    if (stats) {
-        if (rc == 0)
-            stats->files_processed++;
-        else
-            stats->files_failed++;
-    }
-    return rc;
-}
-
-static int process_file_streaming(wc *w, const char *path, run_stats *stats)
+static int process_file(wc *w, const char *path, run_stats *stats)
 {
     char buf[STDIN_CHUNK];
     wc_stream *st = NULL;
     FILE *fp = NULL;
     int rc = -1;
     int open_rc = WC_OK;
-    size_t total_bytes = 0;
+    uintmax_t total_bytes = 0;
 
 #ifdef _WIN32
     fp = win32_fopen_utf8(path, L"rb");
@@ -772,6 +570,8 @@ static int process_file_streaming(wc *w, const char *path, run_stats *stats)
 #endif
     if (!fp) {
         (void)fprintf(stderr, "wc: %s: %s\n", path, strerror(errno));
+        if (stats)
+            stats->files_failed++;
         return -1;
     }
 
@@ -779,6 +579,8 @@ static int process_file_streaming(wc *w, const char *path, run_stats *stats)
     if (!st) {
         (void)fprintf(stderr, "wc: %s: %s\n", path, wc_errstr(open_rc));
         fclose(fp);
+        if (stats)
+            stats->files_failed++;
         return -1;
     }
 
@@ -787,10 +589,13 @@ static int process_file_streaming(wc *w, const char *path, run_stats *stats)
         if (n > 0) {
             size_t consumed = 0;
             int scan_rc = wc_stream_scan_ex(st, buf, n, &consumed);
-            total_bytes += consumed;
+            if (add_uintmax_checked(&total_bytes, consumed) < 0) {
+                (void)fprintf(stderr, "wc: %s: input too large\n", path);
+                goto done;
+            }
             if (scan_rc != WC_OK) {
                 (void)fprintf(stderr,
-                              "wc: %s: %s (after %zu bytes)\n",
+                              "wc: %s: %s (after %" PRIuMAX " bytes)\n",
                               path,
                               wc_errstr(scan_rc),
                               total_bytes);
@@ -821,12 +626,21 @@ static int process_file_streaming(wc *w, const char *path, run_stats *stats)
     rc = 0;
 
 done:
-    if (rc == 0 && stats)
-        stats->bytes_processed += total_bytes;
+    if (rc == 0 && stats &&
+        add_uintmax_checked(&stats->bytes_processed, total_bytes) < 0) {
+        (void)fprintf(stderr, "wc: %s: input too large\n", path);
+        rc = -1;
+    }
     if (st)
         wc_stream_close(st);
     if (fp)
         fclose(fp);
+    if (stats) {
+        if (rc == 0)
+            stats->files_processed++;
+        else
+            stats->files_failed++;
+    }
     return rc;
 }
 
@@ -836,7 +650,7 @@ static int process_stdin(wc *w, run_stats *stats)
     wc_stream *st = NULL;
     int rc;
     int open_rc = WC_OK;
-    size_t total_bytes = 0;
+    uintmax_t total_bytes = 0;
 
     st = wc_stream_open(w, &open_rc);
     if (!st) {
@@ -852,10 +666,16 @@ static int process_stdin(wc *w, run_stats *stats)
         if (n > 0) {
             size_t consumed = 0;
             rc = wc_stream_scan_ex(st, buf, n, &consumed);
-            total_bytes += consumed;
+            if (add_uintmax_checked(&total_bytes, consumed) < 0) {
+                (void)fprintf(stderr, "wc: <stdin>: input too large\n");
+                wc_stream_close(st);
+                if (stats)
+                    stats->files_failed++;
+                return -1;
+            }
             if (rc != WC_OK) {
                 (void)fprintf(stderr,
-                              "wc: <stdin>: %s (after %zu bytes)\n",
+                              "wc: <stdin>: %s (after %" PRIuMAX " bytes)\n",
                               wc_errstr(rc),
                               total_bytes);
                 wc_stream_close(st);
@@ -892,7 +712,11 @@ static int process_stdin(wc *w, run_stats *stats)
 
     wc_stream_close(st);
     if (stats) {
-        stats->bytes_processed += total_bytes;
+        if (add_uintmax_checked(&stats->bytes_processed, total_bytes) < 0) {
+            (void)fprintf(stderr, "wc: <stdin>: input too large\n");
+            stats->files_failed++;
+            return -1;
+        }
         stats->files_processed++;
     }
     return 0;
@@ -905,7 +729,7 @@ typedef struct {
     size_t unique;
     size_t filtered;
     size_t displayed;
-    size_t bytes;
+    uintmax_t bytes;
 } summary_info;
 
 typedef struct {
@@ -933,6 +757,8 @@ static column_widths measure_columns(const wc_word *words, size_t n)
         size_t count_digits = digits_size(words[i].count);
         size_t word_len = strlen(words[i].word);
 
+        if (word_len > TABLE_WORD_WIDTH_LIMIT)
+            word_len = TABLE_WORD_WIDTH_LIMIT;
         if (rank_digits > w.rank_w)
             w.rank_w = rank_digits;
         if (count_digits > w.count_w)
@@ -957,79 +783,124 @@ static int use_color(const cli_opts *opts)
 #endif
 }
 
-static void print_table(const wc_word *words, size_t n, int color)
+static int print_spaces(size_t n)
+{
+    while (n > 0) {
+        if (cli_putc(stdout, ' ') < 0)
+            return -1;
+        n--;
+    }
+    return 0;
+}
+
+static int print_size_right(size_t v, size_t width)
+{
+    size_t digits = digits_size(v);
+
+    if (width > digits && print_spaces(width - digits) < 0)
+        return -1;
+    return cli_fprintf(stdout, "%zu", v);
+}
+
+static int print_string_right(const char *s, size_t width)
+{
+    size_t n = strlen(s);
+
+    if (width > n && print_spaces(width - n) < 0)
+        return -1;
+    return cli_fputs(stdout, s);
+}
+
+static int print_table(const wc_word *words, size_t n, int color)
 {
     column_widths w = measure_columns(words, n);
     const char *emph = color ? "\x1b[1m" : "";
     const char *reset = color ? "\x1b[0m" : "";
     size_t sep_len = w.rank_w + w.count_w + w.word_w + 4u;
 
-    (void)printf("%s%*s  %*s  %-*s%s\n",
-                 emph,
-                 (int)w.rank_w,
-                 "#",
-                 (int)w.count_w,
-                 "count",
-                 (int)w.word_w,
-                 "word",
-                 reset);
-    for (size_t i = 0; i < sep_len; i++)
-        putchar('-');
-    putchar('\n');
+    if (cli_fputs(stdout, emph) < 0 || print_string_right("#", w.rank_w) < 0 ||
+        cli_fputs(stdout, "  ") < 0 ||
+        print_string_right("count", w.count_w) < 0 ||
+        cli_fputs(stdout, "  ") < 0 || cli_fputs(stdout, "word") < 0 ||
+        cli_fputs(stdout, reset) < 0 || cli_putc(stdout, '\n') < 0) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < sep_len; i++) {
+        if (cli_putc(stdout, '-') < 0)
+            return -1;
+    }
+    if (cli_putc(stdout, '\n') < 0)
+        return -1;
 
     for (size_t i = 0; i < n; i++) {
-        (void)printf("%*zu  %*zu  %-*s\n",
-                     (int)w.rank_w,
-                     i + 1u,
-                     (int)w.count_w,
-                     words[i].count,
-                     (int)w.word_w,
-                     words[i].word);
+        if (print_size_right(i + 1u, w.rank_w) < 0 ||
+            cli_fputs(stdout, "  ") < 0 ||
+            print_size_right(words[i].count, w.count_w) < 0 ||
+            cli_fputs(stdout, "  ") < 0 ||
+            cli_fputs(stdout, words[i].word) < 0 ||
+            cli_putc(stdout, '\n') < 0) {
+            return -1;
+        }
     }
+    return 0;
 }
 
-static void print_tsv(const wc_word *words, size_t n)
+static int print_tsv(const wc_word *words, size_t n)
 {
-    (void)printf("rank\tcount\tword\n");
+    if (cli_fputs(stdout, "rank\tcount\tword\n") < 0)
+        return -1;
     for (size_t i = 0; i < n; i++) {
-        (void)printf("%zu\t%zu\t%s\n", i + 1u, words[i].count, words[i].word);
+        if (cli_fprintf(stdout,
+                        "%zu\t%zu\t%s\n",
+                        i + 1u,
+                        words[i].count,
+                        words[i].word) < 0) {
+            return -1;
+        }
     }
+    return 0;
 }
 
-static void
+static int
 print_json(const wc_word *words, size_t n, const summary_info *summary)
 {
-    (void)printf("{\"words\":[");
+    if (cli_fputs(stdout, "{\"words\":[") < 0)
+        return -1;
     for (size_t i = 0; i < n; i++) {
-        (void)printf("%s{\"rank\":%zu,\"count\":%zu,\"word\":\"%s\"}",
-                     (i == 0) ? "" : ",",
-                     i + 1u,
-                     words[i].count,
-                     words[i].word);
+        if (cli_fprintf(stdout,
+                        "%s{\"rank\":%zu,\"count\":%zu,\"word\":\"%s\"}",
+                        (i == 0) ? "" : ",",
+                        i + 1u,
+                        words[i].count,
+                        words[i].word) < 0) {
+            return -1;
+        }
     }
-    (void)printf("],\"summary\":{"
-                 "\"total\":%zu,"
-                 "\"unique\":%zu,"
-                 "\"filtered\":%zu,"
-                 "\"displayed\":%zu,"
-                 "\"bytes\":%zu}}\n",
-                 summary->total,
-                 summary->unique,
-                 summary->filtered,
-                 summary->displayed,
-                 summary->bytes);
+    return cli_fprintf(stdout,
+                       "],\"summary\":{"
+                       "\"total\":%zu,"
+                       "\"unique\":%zu,"
+                       "\"filtered\":%zu,"
+                       "\"displayed\":%zu,"
+                       "\"bytes\":%" PRIuMAX "}}\n",
+                       summary->total,
+                       summary->unique,
+                       summary->filtered,
+                       summary->displayed,
+                       summary->bytes);
 }
 
-static void print_summary_text(const summary_info *summary, FILE *out)
+static int print_summary_text(const summary_info *summary, FILE *out)
 {
-    (void)fprintf(out,
-                  "Total: %zu  Unique: %zu  Filtered: %zu  Shown: %zu  Bytes: "
-                  "%zu\n",
-                  summary->total,
-                  summary->unique,
-                  summary->filtered,
-                  summary->displayed,
-                  summary->bytes);
+    return cli_fprintf(out,
+                       "Total: %zu  Unique: %zu  Filtered: %zu  Shown: %zu  "
+                       "Bytes: %" PRIuMAX "\n",
+                       summary->total,
+                       summary->unique,
+                       summary->filtered,
+                       summary->displayed,
+                       summary->bytes);
 }
 
 static size_t
@@ -1061,6 +932,10 @@ static const char *yn(int v)
     return v ? "yes" : "no";
 }
 
+#define BUILD_CFG_HAS(cfg_, field_)                                       \
+    ((cfg_) && (cfg_)->struct_size >= offsetof(wc_build_config, field_) + \
+                                              sizeof((cfg_)->field_))
+
 /* --- Main -------------------------------------------------------------- */
 
 int main(int argc, char **argv)
@@ -1070,9 +945,10 @@ int main(int argc, char **argv)
     int err = 0;
     int rc = 1;
     wc_limits lim;
-    int have_limits;
+    int have_limits = 0;
     int open_rc = WC_OK;
     cli_opts opts;
+    const wc_build_config *build = NULL;
     int first_file = 1;
     size_t max_word = 0;
     run_stats stats = { 0, 0, 0 };
@@ -1097,50 +973,76 @@ int main(int argc, char **argv)
     argv = argv_win;
 #endif
 
-#if !WC_BOOL(WC_ASCII_ONLY)
-    /* Force deterministic ctype classification; not Unicode-aware. */
-    setlocale(LC_CTYPE, "C");
-#endif
-
-    have_limits = parse_wc_limits_from_env(&lim);
-    if (have_limits < 0) {
-        (void)fprintf(stderr,
-                      "wc: invalid WC_MAX_BYTES value (must be non-negative "
-                      "integer)\n");
-        rc = 1;
-        goto cleanup;
-    }
+    build = wc_build_info();
+    wc_limits_init(&lim);
 
     if (parse_cli_opts(argc, argv, &opts, &first_file) < 0) {
-        print_usage();
+        (void)print_usage(stderr);
         rc = 2;
         goto cleanup;
     }
 
     if (opts.show_help) {
-        print_usage();
-        rc = 0;
+        rc = (print_usage(stdout) == 0 && cli_flush(stdout) == 0) ? 0 : 1;
         goto cleanup;
     }
 
     if (opts.show_version) {
-        (void)printf("%s\n", wc_version());
-        (void)printf("features: hosted=%s, libc-string=%s, libc-qsort=%s, "
-                     "errno=%s, ascii-only=%s, stream-reuse=%s, no-heap=%s\n",
-                     yn(WC_STDC_HOSTED != 0),
-                     yn(WC_USE_LIBC_STRING != 0),
-                     yn(WC_USE_LIBC_QSORT != 0),
-                     yn(WC_HAVE_ERRNO != 0),
-                     yn(WC_ASCII_ONLY != 0),
-                     yn(WC_STREAM_REUSE_SCANBUF != 0),
-                     yn(WC_NO_HEAP != 0));
-        rc = 0;
+        int out_rc = cli_fprintf(stdout, "%s\n", wc_version());
+        if (BUILD_CFG_HAS(build, trust_static_buffer_alignment)) {
+            if (out_rc == 0) {
+                out_rc = cli_fprintf(
+                        stdout,
+                        "features: hosted=%s, libc-string=%s, libc-qsort=%s, "
+                        "errno=%s, ascii-only=%s, stream-reuse=%s, no-heap=%s, "
+                        "hash-strong=%s, uintptr=%s, "
+                        "trust-static-alignment=%s\n",
+                        yn(build->hosted),
+                        yn(build->use_libc_string),
+                        yn(build->use_libc_qsort),
+                        yn(build->have_errno),
+                        yn(build->ascii_only),
+                        yn(build->stream_reuse_scanbuf),
+                        yn(build->no_heap),
+                        yn(build->hash_strong),
+                        yn(build->have_uintptr),
+                        yn(build->trust_static_buffer_alignment));
+            }
+        }
+        rc = (out_rc == 0 && cli_flush(stdout) == 0) ? 0 : 1;
         goto cleanup;
+    }
+
+    if ((BUILD_CFG_HAS(build, hosted) && !build->hosted) ||
+        (BUILD_CFG_HAS(build, no_heap) && build->no_heap)) {
+        (void)fprintf(stderr,
+                      "wc: CLI requires a hosted heap-enabled wordcount "
+                      "library\n");
+        rc = 1;
+        goto cleanup;
+    }
+
+    if (BUILD_CFG_HAS(build, ascii_only)) {
+        if (!build->ascii_only)
+            setlocale(LC_CTYPE, "C");
+    } else {
+#if !WC_BOOL(WC_ASCII_ONLY)
+        setlocale(LC_CTYPE, "C");
+#endif
     }
 
     if (opts.has_max_bytes) {
         lim.max_bytes = opts.max_bytes;
         have_limits = 1;
+    } else {
+        have_limits = parse_wc_limits_from_env(&lim);
+        if (have_limits < 0) {
+            (void)fprintf(stderr,
+                          "wc: invalid WC_MAX_BYTES value (must be "
+                          "non-negative integer)\n");
+            rc = 1;
+            goto cleanup;
+        }
     }
     if (opts.strict_max_bytes) {
         lim.strict_max_bytes = 1;
@@ -1165,10 +1067,13 @@ int main(int argc, char **argv)
             err = 1;
     } else {
         for (i = first_file; i < argc; i++) {
-            if (process_file(w, argv[i], opts.no_mmap ? 0 : 1, &stats) < 0)
+            if (process_file(w, argv[i], &stats) < 0)
                 err = 1;
         }
     }
+
+    if (err)
+        goto finalize;
 
     summary.total = wc_total(w);
     summary.unique = wc_unique(w);
@@ -1187,8 +1092,11 @@ int main(int argc, char **argv)
     summary.filtered = filtered_len;
     summary.displayed = opts.quiet ? 0 : display_len;
 
-    if (!opts.quiet && filtered_len == 0 && opts.format != FORMAT_JSON)
-        (void)fprintf(stderr, "No words found.\n");
+    if (!opts.quiet && filtered_len == 0 && opts.format != FORMAT_JSON &&
+        cli_fputs(stderr, "No words found.\n") < 0) {
+        err = 1;
+        goto finalize;
+    }
 
     {
         int color = use_color(&opts);
@@ -1196,28 +1104,33 @@ int main(int argc, char **argv)
 
         switch (opts.format) {
             case FORMAT_TABLE:
-                if (emit > 0)
-                    print_table(words, emit, color);
-                if (opts.summary)
-                    print_summary_text(&summary, stdout);
+                if (emit > 0 && print_table(words, emit, color) < 0)
+                    err = 1;
+                if (!err && opts.summary &&
+                    print_summary_text(&summary, stdout) < 0)
+                    err = 1;
                 break;
             case FORMAT_TSV:
-                if (emit > 0)
-                    print_tsv(words, emit);
-                if (opts.summary)
-                    print_summary_text(&summary, stderr);
+                if (emit > 0 && print_tsv(words, emit) < 0)
+                    err = 1;
+                if (!err && opts.summary &&
+                    print_summary_text(&summary, stderr) < 0)
+                    err = 1;
                 break;
             case FORMAT_JSON: {
                 summary_info json_summary = summary;
                 json_summary.displayed = emit;
                 json_summary.filtered = filtered_len;
-                print_json(words, emit, &json_summary);
+                if (print_json(words, emit, &json_summary) < 0)
+                    err = 1;
                 break;
             }
             default:
                 break;
         }
     }
+    if (!err && (cli_flush(stdout) < 0 || cli_flush(stderr) < 0))
+        err = 1;
 
 finalize:
     wc_results_free(words);
@@ -1232,4 +1145,7 @@ cleanup:
     return rc;
 }
 
+#else
+extern int wc_main_disabled_translation_unit;
+int wc_main_disabled_translation_unit = 0;
 #endif /* WC_NO_HOSTED_MAIN */

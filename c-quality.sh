@@ -9,6 +9,7 @@ set -euo pipefail
 #   ./c-quality.sh . build
 
 readonly JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+readonly CLANG_TIDY_JOBS="${CLANG_TIDY_JOBS:-1}"
 readonly SRC_ROOT="${1:-.}"
 readonly BUILD_HINT="${2:-}"
 readonly CDB="compile_commands.json"
@@ -20,10 +21,11 @@ for tool in clang-format clang-tidy cppcheck; do
   command -v "$tool" >/dev/null 2>&1 || fail "Missing tool: $tool"
 done
 
-# Prefer git-tracked sources so we don't format/check build artifacts.
+# Prefer repository sources, including new untracked files, while still
+# excluding ignored build artifacts.
 list_files() {
   if command -v git >/dev/null 2>&1 && git -C "$SRC_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$SRC_ROOT" ls-files -z -- '*.c' '*.h'
+    git -C "$SRC_ROOT" ls-files -z --cached --others --exclude-standard -- '*.c' '*.h'
   else
     find "$SRC_ROOT" -type d \( -name .git -o -name build -o -name 'build-*' \) -prune \
       -o -type f \( -name '*.c' -o -name '*.h' \) -print0
@@ -32,7 +34,7 @@ list_files() {
 
 list_c_files() {
   if command -v git >/dev/null 2>&1 && git -C "$SRC_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$SRC_ROOT" ls-files -z -- '*.c'
+    git -C "$SRC_ROOT" ls-files -z --cached --others --exclude-standard -- '*.c'
   else
     find "$SRC_ROOT" -type d \( -name .git -o -name build -o -name 'build-*' \) -prune \
       -o -type f -name '*.c' -print0
@@ -78,18 +80,19 @@ else
 fi
 
 note "Running clang-tidy..."
-if cdb_dir="$(detect_cdb_dir)"; then
-  c_files=()
-  while IFS= read -r -d '' f; do
-    c_files+=("$f")
-  done < <(list_c_files)
-  if ((${#c_files[@]} == 0)); then
-    note "No C sources found; skipping clang-tidy."
-  else
-    printf '%s\0' "${c_files[@]}" | xargs -0 -P "$JOBS" -n 1 clang-tidy -p "$cdb_dir"
-  fi
+c_files=()
+while IFS= read -r -d '' f; do
+  c_files+=("$f")
+done < <(list_c_files)
+if ((${#c_files[@]} == 0)); then
+  note "No C sources found; skipping clang-tidy."
 else
-  note "No $CDB found (expected in repo root or build dir); skipping clang-tidy."
+  # Use one deterministic C99 parse profile. The CMake database intentionally
+  # contains many variant entries for wordcount.c; clang-tidy 18 can select a
+  # duplicate variant that crashes before producing diagnostics.
+  printf '%s\0' "${c_files[@]}" \
+    | xargs -0 -P "$CLANG_TIDY_JOBS" -I{} clang-tidy --quiet "{}" -- \
+      -std=c99 -I"$SRC_ROOT" -DWC_ENABLE_VALIDATE=1
 fi
 
 note "Running cppcheck (hard fail on warnings/perf/portability)..."

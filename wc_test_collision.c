@@ -14,7 +14,7 @@ static int expect(int cond, const char *msg)
 
 int main(void)
 {
-    wc_word out[2];
+    wc_word *out = NULL;
     size_t n = 0;
     int rc = 0;
 
@@ -31,13 +31,16 @@ int main(void)
     rc |= expect(wc_total(w) == 2, "total count mismatch");
     rc |= expect(wc_validate(w) == WC_OK, "validate failed");
 
-    rc |= expect(wc_results_into(w, out, 2, &n) == WC_OK,
-                 "results_into failed");
+    rc |= expect(wc_results(w, &out, &n) == WC_OK, "results failed");
+    if (rc)
+        goto done;
     rc |= expect(n == 2, "results length mismatch");
     rc |= expect(out[0].count == 1 && out[1].count == 1, "counts mismatch");
     rc |= expect(strcmp(out[0].word, "alpha") == 0, "word[0] mismatch");
     rc |= expect(strcmp(out[1].word, "beta") == 0, "word[1] mismatch");
 
+done:
+    wc_results_free(out);
     wc_close(w);
     return rc ? 1 : 0;
 }

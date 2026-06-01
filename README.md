@@ -2,10 +2,11 @@
 
 A small, embeddable, **C99** word-frequency library with:
 
-- Predictable memory use (optional hard caps and static-buffer mode)
+- Predictable memory use (optional allocation budgets, strict caps, and
+  static-buffer mode)
 - Robust error handling (including torture-tested OOM paths)
 - Cross-platform support (Windows + POSIX)
-- A clean, stable API (single header + single implementation)
+- A small pre-release API (single header + single implementation)
 - C++-friendly linkage via `extern "C"` and a `WC_RESTRICT` macro
 - Build-configuration introspection (`wc_build_info`) for ABI sanity checks
 - A zero-allocation iterator API for memory-constrained enumeration
@@ -56,7 +57,7 @@ For a concise reference, see:
 11. [Adversarial Inputs and Complexity](#adversarial-inputs-and-complexity)
 12. [ABI and Build Configuration Compatibility](#abi-and-build-configuration-compatibility)
 13. [Performance and Complexity](#performance-and-complexity)
-14. [Versioning and Stability Guarantees](#versioning-and-stability-guarantees)
+14. [Versioning and Compatibility Notes](#versioning-and-compatibility-notes)
 15. [Guidelines for Contributors](#guidelines-for-contributors)
 16. [License](#license)
 
@@ -85,8 +86,8 @@ The core implementation resides in:
 
 On top of the library, the repository ships:
 
-- `wc_main.c` – a CLI tool using memory-mapped I/O for files and streaming for
-  stdin
+- `wc_main.c` – a CLI tool that streams file operands and stdin through the
+  library streaming API
 - `wc_test.c` – a comprehensive test suite with optional OOM injection + fuzz harness
 - `CMakeLists.txt` / `CMakePresets.json` – cross-compiler build configuration
 - `c-build.sh` / `c-quality.sh` – developer tooling for multi-toolchain builds
@@ -104,8 +105,8 @@ wc_limits lim;
 wc_limits_init(&lim);
 lim.max_bytes = 8 * 1024 * 1024; /* optional budget */
 wc *w = wc_open_ex(0, &lim, NULL);
-wc_add_norm_n(w, "Hello", 5); /* length-based, lowercased */
-wc_reserve(w, 1024, 0);       /* optional preflight */
+wc_add_norm_n(w, "Hello", 5); /* length-based normalized add */
+wc_reserve(w, 1024, 0);       /* best-effort preflight */
 /* ... feed data ... */
 wc_word *out = NULL; size_t n = 0;
 wc_topn(w, 10, &out, &n);
@@ -151,13 +152,14 @@ The library deliberately does **not** try to:
 - Be the fastest possible implementation on x86-64  
   The focus is correctness and robustness, not micro-benchmarks.
 - Expose complex concurrency primitives  
-  The library is re-entrant and per-instance thread-safe; it does not manage
-  threads for you.
+  Separate `wc` instances may be used concurrently. A single `wc` or
+  `wc_stream` requires external synchronization.
 - Support arbitrary text encodings or EBCDIC  
   It assumes an ASCII-compatible execution character set.
 - Provide cryptographic or DoS-hard hashing  
-  FNV-1a is used for speed and reproducibility; a hash seed is available for
-  simple randomization, but this is not a cryptographic defense.
+  Default FNV-1a hashing is used for speed and reproducibility; SipHash-2-4 is
+  available with `WC_HASH_STRONG=1`. Neither mode is documented as a
+  cryptographic or DoS-hard defense.
 
 ---
 
@@ -169,7 +171,7 @@ A `wc` instance (opaque handle) tracks:
 
 - A hash table of **slots**, each holding:
   - `word` – pointer to NUL-terminated stored word
-  - `hash` – precomputed 32-bit hash (FNV-1a over stored characters, with a per-instance seed)
+  - `hash` – precomputed 32-bit hash value for indexing and fast rejection
   - `cnt` – occurrence count
   - `n` – stored key length (collision-safe comparisons)
 - An **arena** of one or more blocks in which:
@@ -232,8 +234,9 @@ Word strings are stored in an arena:
 * Allocations:
 
   * Bump-pointer within the current block
-  * Alignment to an internal alignment requirement (`WC_ALIGN`) derived from the
-    union of internal types used by the allocator
+  * Alignment to the library's internal allocator requirement, derived from the
+    union of internal types used by the allocator. Use `WC_STATIC_BUFFER` for
+    portable static-buffer alignment.
   * Zero-initialized memory for safety and deterministic behavior
 
 In static-buffer mode:
@@ -249,7 +252,9 @@ buffer) are accounted in `bytes_used`, up to `bytes_limit`:
 
 * In **dynamic mode** (no static buffer):
 
-  * `bytes_limit` (from `wc_limits.max_bytes`) caps internal allocations.
+  * `bytes_limit` (from `wc_limits.max_bytes`) budgets steady-state internal
+    allocations. With `strict_max_bytes == 0`, table growth may transiently
+    exceed this budget if the post-grow footprint fits.
 * In **static-buffer mode**:
 
   * All internal allocations are carved out of `[static_buf,
@@ -264,7 +269,7 @@ overflow `size_t` or exceed configured limits fails cleanly.
 Allocations performed via the public interface (e.g., `wc_results` buffer) are
 *not* counted against these internal limits, as their lifetime is under the
 caller’s control. Internal table growth may temporarily allocate via
-`WC_MALLOC` to avoid peak budget spikes; accounting is updated after the rehash
+`WC_MALLOC` outside the steady-state budget; accounting is updated after the rehash
 completes.
 
 ### Static Buffer (MCU / No-malloc Mode)
@@ -282,7 +287,7 @@ In this mode:
 * **No re-use** or freeing occurs inside the buffer.
 * **Alignment matters**: use the `WC_STATIC_BUFFER(name, size)` helper to get
   portable alignment for the internal types. Misaligned buffers are rejected
-  with `WC_EALIGN`.
+  with `WC_EALIGN` when runtime pointer-alignment checks are available.
 * **Hash table growth is disabled**:
 
   * Once the load factor exceeds ~0.7, inserting a *new unique* word fails with `WC_NOMEM`.
@@ -302,12 +307,14 @@ When `WC_NO_HEAP=0` (default):
 When `WC_NO_HEAP=1`:
 
 * The library never calls `malloc` / `realloc` / `free`.
-* `wc_open_ex` requires `static_buf` (or fails).
-* `wc_results` and `wc_topn` return `WC_NOMEM` unconditionally; use
-  `wc_results_into` / `wc_topn_into` with caller-supplied storage, or
-  iterate via `wc_cursor`.
+* `wc_open_ex` requires `static_buf` (or fails). If `handle_buf` is omitted,
+  the handle is placed at the start of `static_buf` and charged to that budget.
+* `wc_results` and `wc_topn` are unavailable: valid output calls with a valid
+  handle return `WC_NOMEM`; bad arguments still return `WC_ERROR`. Use
+  `wc_cursor` for zero-allocation enumeration.
 * `wc_stream_open` returns `NULL` with `WC_NOMEM`; use
-  `wc_stream_open_inplace` with caller-supplied storage.
+  `wc_stream_open_inplace` with caller-supplied storage only when
+  `WC_HAVE_UINTPTR=1`.
 
 On very small systems with `WC_NO_HEAP=0`, redirect `WC_MALLOC` / `WC_FREE`
 to a custom allocator or secondary static pool for the handle and results
@@ -316,10 +323,9 @@ arrays.
 To make behavior deterministic and fail-fast:
 
 * In static-buffer mode, `wc_open_ex` performs an **initialization-time dry
-  run** using a scratch allocator state that is **side-effect free**: it
-  validates the budget and alignment without writing into the caller’s static
-  buffer (except for optional `handle_buf` storage if explicitly provided).
-  It simulates allocating:
+  run** using a scratch allocator state before writing to caller-provided
+  handle or static storage. It validates the budget and alignment and
+  simulates allocating:
 
   * The initial hash table
   * The first arena block
@@ -330,8 +336,14 @@ To make behavior deterministic and fail-fast:
 
 Static buffer alignment:
 
-- When `uintptr_t` is available, `wc_open_ex` verifies `static_buf` alignment at runtime.
-- If `uintptr_t` is not available, static-buffer mode is rejected unless `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` is set (which disables the runtime check and relies on the caller/platform guarantees).
+- When `uintptr_t` is available, `wc_open_ex` verifies `static_buf`,
+  `handle_buf`, and in-place stream-storage alignment at runtime.
+- If `uintptr_t` is not available, static-buffer mode is rejected unless
+  `WC_TRUST_STATIC_BUFFER_ALIGNMENT=1` is set. That trust mode disables runtime
+  alignment checks and makes correct alignment of `static_buf`/`handle_buf` a
+  caller precondition.
+- `wc_stream_open_inplace` still requires `uintptr_t`; without pointer-range
+  checks it fails closed with `WC_EBADLIMITS`.
 - There is intentionally no “size_t-based” runtime fallback, because pointer-to-integer conversions are only reliably supported via `uintptr_t`.
 
 ### Invariants and Consistency Guarantees
@@ -341,23 +353,29 @@ designed to remain true even after `WC_NOMEM` returns (partial progress allowed)
 
 * `cap` is always a power of two and non-zero after successful open.
 * `len == number_of_occupied_slots` (unique entries).
-* `tot == sum_of_all_slot_counts` (modulo `size_t` overflow semantics).
+* `tot == sum_of_all_slot_counts`; attempted `size_t` counter overflow fails
+  before mutation.
 * Every stored word string is NUL-terminated and lives in the arena for the
   lifetime of the `wc`.
 * After `WC_NOMEM`, the instance remains valid and queryable via:
 
-  * `wc_total`, `wc_unique`, `wc_results`, and cursor iteration.
+  * `wc_total`, `wc_unique`, and cursor iteration.
+
+`wc_results` and `wc_topn` require heap-enabled builds and a successful result
+array allocation.
 
 **Critical guarantee (memory-limit semantics):**
 
 * If a word already exists in the table, incrementing its count does not
-  require allocation and therefore continues to succeed even after the instance
-  has exhausted memory/capacity for inserting *new unique* words.
+  require allocation and therefore continues to succeed after the instance has
+  exhausted memory/capacity for inserting *new unique* words, unless the word
+  count or total count has reached `WC_SIZE_MAX`.
 
 Practically:
 
-* `wc_add(w, "existing")` can still return `WC_OK` after previous inserts returned `WC_NOMEM`,
-  as long as `"existing"` was already present.
+* `wc_add(w, "existing")` can still return `WC_OK` after previous inserts
+  returned `WC_NOMEM`, as long as `"existing"` was already present and its
+  counter can still be incremented.
 * `wc_scan()` may return `WC_NOMEM` when it encounters a *new unique* word that
   cannot be inserted. Any words processed before that failure are retained.
 
@@ -369,7 +387,8 @@ All public functions follow a clear error protocol:
 
   * `WC_OK` (0) – success
   * `WC_ERROR` (1) – invalid arguments or internal consistency failure
-  * `WC_NOMEM` (2) – allocation failed or memory/capacity limit reached
+  * `WC_NOMEM` (2) – allocation failed, a memory/capacity limit was reached,
+    or a counter would overflow
 * Query functions returning `size_t`:
 
   * Return 0 when passed `NULL`
@@ -414,8 +433,8 @@ typedef struct wc_limits {
     size_t        block_size;
     void         *static_buf;
     size_t        static_size;
-    /* Set to 0 for deterministic behavior (default)
-       Set to random value for DoS protection. */
+    /* Set to 0 for deterministic behavior (default).
+       Non-zero perturbs hashing; it is not DoS-hard. */
     unsigned long hash_seed;
     size_t        max_probe;
     void         *handle_buf;
@@ -427,7 +446,8 @@ Per-instance memory and sizing limits:
 
 * `max_bytes`:
 
-  * Hard cap on total **internal** allocations for this `wc` in dynamic mode.
+  * Steady-state budget for **internal** allocations for this `wc` in dynamic
+    mode.
   * If `strict_max_bytes != 0`, the cap is treated as a **peak** limit: growth
     fails if the transient footprint (old table + new table + arena writes)
     would exceed `max_bytes`.
@@ -438,8 +458,9 @@ Per-instance memory and sizing limits:
     * Optional heap/static scan buffer (if `WC_STACK_BUFFER == 0`)
   * Does **not** count:
 
-    * The `wc` struct itself when allocated outside the internal allocator
-      (e.g., via `WC_MALLOC` or placed in `handle_buf`)
+    * The `wc` struct itself when allocated in separate handle storage
+      (e.g., via `WC_MALLOC` or a caller-provided `handle_buf` that does not
+      share `static_buf`)
     * Arrays returned by `wc_results` and `wc_topn`
     * The `wc_stream` object returned by `wc_stream_open`
   * `0` = unlimited.
@@ -486,16 +507,20 @@ Per-instance memory and sizing limits:
     * Optional caller-provided storage for the `wc` handle itself.
     * When both are non-zero, the library places the `struct wc` there instead
       of calling `WC_MALLOC`.
-    * If `handle_buf` aliases `static_buf`, it must start at `static_buf` and
-      its footprint (rounded up to internal alignment) counts against the
-      static budget.
+    * If `handle_buf` shares static storage, it must be exactly equal to
+      `static_buf`; its footprint (rounded up to internal alignment) counts
+      against the static budget.
+    * Partial overlap between `handle_buf` and `static_buf` is invalid.
+      Separate non-overlapping buffers are allowed when the build can prove
+      non-overlap.
     * Must be aligned for `struct wc`; use `wc_handle_size()` to query the
       required size.
 
 Always initialize with `wc_limits_init(&lim)` or
 `wc_limits lim = WC_LIMITS_INIT();`. `struct_size` follows an
 append-only contract: smaller values zero-fill missing tail fields, larger
-values have their extra bytes ignored; `struct_size == 0` is invalid.
+values have their extra bytes ignored; `struct_size` must be at least
+`sizeof(size_t)`.
 
 ```c
 typedef struct wc_word {
@@ -515,6 +540,16 @@ typedef struct wc_build_config {
     size_t        sizeof_wc;
     size_t        sizeof_slot;
     size_t        sizeof_wc_limits;
+    int           hosted;
+    int           use_libc_string;
+    int           use_libc_qsort;
+    int           have_errno;
+    int           ascii_only;
+    int           stream_reuse_scanbuf;
+    int           no_heap;
+    int           hash_strong;
+    int           have_uintptr;
+    int           trust_static_buffer_alignment;
 } wc_build_config;
 ```
 
@@ -531,7 +566,7 @@ typedef struct wc_cursor {
 #define WC_OK    0
 #define WC_ERROR 1
 #define WC_NOMEM 2
-#define WC_EALIGN 3     /* misaligned static_buf */
+#define WC_EALIGN 3     /* misaligned caller-provided buffer */
 #define WC_EBADLIMITS 4 /* invalid/unsatisfiable limits */
 #define WC_EBUSY 5      /* conflicting stream/static buffer use */
 ```
@@ -562,9 +597,12 @@ Key semantics:
 * `wc_add` is **case-sensitive** and NUL-terminated.
 * `wc_add_n` is **case-sensitive** with explicit length; embedded `'\0'`
   terminates the word (prefix is used).
-* `wc_add_norm_n` is **case-insensitive** (ASCII lowercase normalization) with
-  explicit length; embedded `'\0'` terminates the word.
-* `wc_scan` is **case-insensitive** (ASCII lowercase normalization).
+* `wc_add_norm_n` stores the supplied prefix after case folding; it does not
+  tokenize. The default build lowercases ASCII, while `WC_ASCII_ONLY=0` uses
+  `tolower` from `<ctype.h>` under the active C locale. Embedded `'\0'`
+  terminates the word.
+* `wc_scan` is case-insensitive under the same folding rules and performs
+  tokenization.
 * Words are truncated at `max_word` and the hash/equality operate on the stored prefix.
 
 Partial-progress semantics under `WC_NOMEM`:
@@ -579,13 +617,10 @@ size_t wc_total(const wc *w);
 size_t wc_unique(const wc *w);
 
 int wc_results(const wc *w, wc_word **WC_RESTRICT out, size_t *WC_RESTRICT n);
-int wc_results_into(const wc *w, wc_word *out, size_t out_cap, size_t *out_n);
 void wc_results_free(wc_word *r);
 
 int wc_topn(const wc *w, size_t n,
             wc_word **WC_RESTRICT out, size_t *WC_RESTRICT out_n);
-int wc_topn_into(const wc *w, size_t n,
-                 wc_word *out, size_t out_cap, size_t *out_n);
 
 int wc_get_stats(const wc *w, wc_stats *out);
 int wc_reserve(wc *w, size_t expected_unique, size_t expected_bytes);
@@ -593,12 +628,11 @@ int wc_reserve(wc *w, size_t expected_unique, size_t expected_bytes);
 
 * `wc_results` / `wc_topn`: allocate via `WC_MALLOC`; caller frees with
   `wc_results_free`. Unavailable when `WC_NO_HEAP=1` (returns `WC_NOMEM`).
-* `wc_results_into` / `wc_topn_into`: zero-allocation variants; caller supplies
-  storage. Query mode: pass `out==NULL` or `out_cap==0` to retrieve required
-  length in `*out_n`.
-* `wc_reserve`: preflight capacity for `expected_unique` words and
-  `expected_bytes` of arena storage. Returns `WC_OK` if the budget can
-  accommodate the request, `WC_NOMEM` otherwise.
+* `wc_cursor`: zero-allocation enumeration. Iteration order is hash-table order;
+  sort externally if a sorted no-heap result is required.
+* `wc_reserve`: best-effort preflight/growth helper for `expected_unique`
+  words and `expected_bytes` of arena storage. It is not a guarantee for
+  future inserts or scans; callers must still handle `WC_NOMEM`.
 
 ### Streaming API
 ```c
@@ -615,8 +649,22 @@ void wc_stream_close(wc_stream *s);
 ```
 
 Streaming matches `wc_scan` for tokenization, normalization, and truncation.
-On error, `wc_stream_scan_ex` reports partial consumption via `consumed_out`
-and discards the failing word to allow forward progress.
+If insertion of a buffered word fails while scanning a separator,
+`wc_stream_scan_ex` reports partial consumption via `consumed_out`, discards
+that word, and leaves the stream usable for forward progress. `WC_ERROR` from
+invalid arguments, detached streams, or oversized chunks is fatal/no-progress.
+If the parent `wc` is closed first, open streams are detached: later scan/finish
+calls return `WC_ERROR`, and `wc_stream_close` remains safe. `wc_stream_finish`
+is idempotent and must be called before close when a trailing word should be
+counted. `wc_stream_close` releases the stream but does not flush that trailing
+word.
+Storage passed to `wc_stream_open_inplace` is caller-owned and must remain valid
+for every call that uses the stream pointer, including `wc_stream_close`. If the
+parent `wc` is closed first, the library holds no further references to that
+storage; callers may reuse it only if they will not call stream APIs with that
+pointer again. It must not overlap the parent `wc`, its internal allocations, or
+active streams. Builds without `uintptr_t` always reject in-place stream storage
+with `WC_EBADLIMITS`, because non-overlap cannot be verified.
 
 ### Zero-Allocation Iterator API
 
@@ -737,7 +785,8 @@ unavailable) unless overridden:
 Initialize with `wc_limits_init(&lim)` or `wc_limits lim = WC_LIMITS_INIT();`
 to set `struct_size` for forward compatibility. Smaller `struct_size` values
 zero-fill missing fields; larger values have their extra tail ignored.
-Passing `struct_size==0` is invalid.
+Passing `struct_size < sizeof(size_t)` is invalid because `struct_size` is the
+required first field read by the library.
 
 Dynamic mode with a 1 MiB internal budget:
 
@@ -760,10 +809,10 @@ lim.static_size = sizeof pool.buf;
 wc *w = wc_open_ex(32, &lim, NULL);
 ```
 
-`wc_reserve` preflights against the effective remaining allocator budget:
-in static mode it honors both `static_size` and `max_bytes` and includes the
-next-allocation alignment padding, so a successful reserve will not
-immediately hit `WC_NOMEM` on the next request for the promised size.
+`wc_reserve` checks the effective remaining allocator budget, including static
+arena alignment padding where applicable. It is a best-effort helper for early
+failure and growth, not a guarantee that later insertions or scans cannot
+return `WC_NOMEM`.
 
 Randomized hashing for untrusted inputs (not cryptographic):
 
@@ -820,8 +869,11 @@ Freestanding / exotic toolchains:
 * `-DWC_USE_LIBC_QSORT=0`
 * `-DWC_HAVE_ERRNO=0`
 * `-DWC_NO_HEAP=1`
+* `-DWC_OMIT_ASSERT=1`
 * `-DWC_U32_T=your_uint32_type`
 * `-DWC_U64_T=your_uint64_type` (only needed with `WC_HASH_STRONG=1`)
+* `-DWC_PTRDIFF_MAX=...` if `<stdint.h>`/`PTRDIFF_MAX` is unavailable
+* `-DWC_HAVE_UINTPTR=0` if `<stdint.h>` is unavailable or has no `uintptr_t`
 
 Tiny RAM profile:
 
@@ -840,6 +892,7 @@ This script:
 1. Builds + tests:
 
    * `clang`
+   * `clang-stronghash`
    * `gcc`
 2. Optionally, if available:
 
@@ -848,8 +901,8 @@ This script:
 3. Runs `./c-quality.sh`:
 
    * `clang-format` (in-place)
-   * `clang-tidy` (uses `compile_commands.json` when present)
-   * `cppcheck`
+   * `clang-tidy` (deterministic C99 parse profile)
+   * `cppcheck` (uses `compile_commands.json` when present)
 
 ### Direct Compilation
 
@@ -871,9 +924,11 @@ cc -std=c99 -O2 -DWC_STACK_BUFFER=0 wordcount.c your_program.c -o your_program
 
 ### Continuous Integration
 
-GitHub Actions builds run on Linux (clang/gcc with sanitizers + fuzz smoke via clang),
-macOS (clang preset), and Windows (MSVC). Presets keep options consistent, and
-`BUILD_TESTING` enables the heap/tiny variants for coverage without installing them by default.
+GitHub Actions currently runs Linux preset builds for `clang`,
+`clang-stronghash`, and `gcc`, plus a clang fuzz smoke test. It also runs the
+`clang` preset on macOS and a raw Visual Studio Debug CMake build on Windows.
+The CMake test matrix includes default, heap-scan-buffer, tiny, forced-hash,
+no-heap, collision, counter-overflow, and portable fault-injection targets.
 
 ### Directory Layout
 
@@ -898,12 +953,13 @@ For chunked sources (stdin, sockets, etc.), use the streaming API:
 
 - `wc_stream_open` / `wc_stream_scan` / `wc_stream_finish` / `wc_stream_close`
   (tokenization/normalization match `wc_scan`; streaming may report partial
-  consumption on error and discards the failing word to allow forward progress)
+  consumption and discard the buffered word when insertion fails at a separator)
 
 Streaming matches `wc_scan` for tokenization, normalization, and truncation but
-intentionally differs in error handling: on errors it may report partial
-consumption and skip the failing word to keep forward progress. The CLI uses
-this API for stdin to avoid drift from the library’s normalization rules.
+intentionally differs in recoverable insertion-failure handling. Invalid
+arguments, detached streams, and oversized chunks remain fatal/no-progress. The
+CLI uses this API for all input paths to avoid drift from the library’s
+normalization rules.
 
 ---
 
@@ -912,37 +968,44 @@ this API for stdin to avoid drift from the library’s normalization rules.
 Usage:
 
 ```bash
-wc [OPTIONS] [FILE|-]
+wc [OPTIONS] [FILE ...]
 ```
 
 Key options:
 
-* Output: `-n/--top N` (default 25), `--all`, `--format table|tsv|json`,
-  `--summary`, `-q/--quiet`
+* Output: `-n/--top N` (default 25; N must be greater than 0 unless `--all`
+  is set), `--all`, `--format table|tsv|json`, `--summary`, `-q/--quiet`
 * Filters: `--min-len N`, `--max-len N`, `--max-word N`
-* Memory: `--max-bytes N`, `--strict-max-bytes`, `--no-mmap`
+* Memory: `--max-bytes N`, `--strict-max-bytes`
 * Presentation: `--color auto|always|never`, `--no-color`
 * Misc: `--version`, `-h/--help`
 
 Output formats:
 
-* `table` (default): width-aware columns (rank, count, word) with optional color
-  headers and a summary footer.
-* `tsv`: header row + rows (`rank<TAB>count<TAB>word`); summary prints to stderr.
+* `table` (default): when rows are displayed, width-aware columns (rank, count,
+  word) with optional color headers. Summary prints to stdout.
+* `tsv`: when rows are displayed, header row + rows
+  (`rank<TAB>count<TAB>word`); summary prints to stderr.
 * `json`: object containing `words` (array of objects with `rank`, `count`,
   `word`) and `summary` (`total`, `unique`, `filtered`, `displayed`, `bytes`).
 
 Behavior:
 
 * No args: read stdin (streaming).
-* With files: memory-map each file and aggregate counts (use `--no-mmap` to
-  stream).
+* With files: stream each file and aggregate counts into one result set.
+* A literal `-` is treated as a filename, not a stdin sentinel.
+* If any input fails, diagnostics are printed and later file operands are still
+  attempted, but normal result output is suppressed because the aggregate would
+  be partial.
+* The CLI requires the linked `wordcount` library to be hosted and heap-enabled;
+  `--help` and `--version` remain available to diagnose build mismatches.
 * `--top N` / `--all` operate on fully sorted results (count desc, then
   lex asc).
 
 ### Environment-Based Limits
 
-`WC_MAX_BYTES` or `--max-bytes` sets an internal allocation cap:
+`WC_MAX_BYTES` or `--max-bytes` sets a steady-state internal allocation budget.
+Add `--strict-max-bytes` to enforce it as a hard peak cap:
 
 ```bash
 WC_MAX_BYTES=8388608 ./wc largefile.txt
@@ -950,17 +1013,17 @@ WC_MAX_BYTES=8388608 ./wc largefile.txt
 
 ### Output
 
-Default: width-aware table of the top 25 words plus a summary footer (stdout).
-TSV emits a header + rows; JSON emits both `words` and `summary`. If no words
-pass filters, a short notice is printed to stderr.
+Default: width-aware table of the top 25 words plus a summary (stdout). TSV
+emits a header only when rows are displayed; JSON emits both `words` and
+`summary`. If no words pass filters, a short notice is printed to stderr for
+non-JSON, non-quiet output.
 
 Exit codes:
 
 * `0` if all inputs processed successfully (even if no words found)
 * `1` for runtime failures (I/O, allocation, parse failures)
 * `2` for usage/argument errors
-* On Windows, file paths are treated as UTF-8 consistently for mmap and
-  streaming (`--no-mmap`).
+* On Windows, file paths are treated as UTF-8 consistently for streaming.
 
 ---
 
@@ -992,7 +1055,9 @@ clang -std=c99 -O1 -g -fsanitize=address,undefined,fuzzer \
 
 ## Portability and Platform Assumptions
 
-* C99 core (hosted environment).
+* C99 core. Hosted libc is the default; freestanding/exotic builds require the
+  documented configuration macros and may also need toolchain flags that disable
+  compiler-injected runtime helpers.
 * Requires `CHAR_BIT == 8` and ASCII-compatible execution character set.
 * Default build is locale-independent. With `WC_ASCII_ONLY=0`, word detection
   follows the active C locale (the CLI sets `LC_CTYPE=C` to remain stable).
@@ -1014,10 +1079,10 @@ clang -std=c99 -O1 -g -fsanitize=address,undefined,fuzzer \
 
 - Enable keyed hashing: set `wc_limits.hash_seed` or compile with `-DWC_HASH_STRONG=1`
   (or, when using CMake, configure with `-DWC_HASH_STRONG=ON`).
-- Bound memory: use `wc_limits.max_bytes` (or `WC_MAX_BYTES`/`--max-bytes`) and `wc_reserve` for known workloads.
-- Clamp probe storms: set `wc_limits.max_probe` when linear probing must be bounded; the value is the maximum slots examined per operation (including the initial slot). Exhaustion allows one grow attempt in dynamic mode, then returns `WC_NOMEM` (duplicates still increment even when the cap is hit).
+- Bound memory: use `wc_limits.max_bytes` (or `WC_MAX_BYTES`/`--max-bytes`) with strict mode when a hard peak cap is required and, for known workloads, `wc_reserve` as a best-effort preflight.
+- Clamp probe storms: set `wc_limits.max_probe` when linear probing must be bounded; the value is the maximum slots examined per operation (including the initial slot). Exhaustion allows one grow attempt in dynamic mode, then returns `WC_NOMEM` for new keys. Existing duplicates still increment when the cap is hit unless their counters are saturated.
 - `wc_stream_open()` allocates a small `wc_stream` object via `WC_MALLOC` and returns a library-owned handle; close it with `wc_stream_close()`.
-- `wc_stream_open_inplace()` uses caller-provided storage (size via `wc_stream_size()`), performs no allocations, and is suitable for strict no-heap deployments.
+- `wc_stream_open_inplace()` uses caller-provided, non-overlapping storage (size via `wc_stream_size()`), performs no allocations, and is suitable for strict no-heap deployments when `uintptr_t` pointer-range checks are available. Without `uintptr_t`, it fails closed with `WC_EBADLIMITS`. The storage must stay valid for every call that uses the stream pointer, including `wc_stream_close`.
 - Stream objects are not counted against `wc_limits.max_bytes` because `max_bytes` applies only to internal allocations tracked by the wc allocator state, not to caller/lifetime-owned API buffers.
 - Use `wc_validate` (build with `-DWC_ENABLE_VALIDATE`) in debug or fuzz builds to catch corruption early.
 
@@ -1039,7 +1104,7 @@ so callers can detect header/library mismatches in complex deployments.
 
 ---
 
-## Versioning and Stability Guarantees
+## Versioning and Compatibility Notes
 
 Version macros are defined in `wordcount.h`:
 
@@ -1048,14 +1113,17 @@ Version macros are defined in `wordcount.h`:
 #define WC_VERSION_NUMBER 5000000UL
 ```
 
-* Major: may introduce breaking changes
-* Minor/Patch: stable signatures; internal improvements and new additions only
+* This repository is still pre-ship. API and documentation may still be reduced
+  before release when doing so removes unsafe contracts.
+* After the first release, compatibility policy should be set by the release
+  notes for that release series.
 
 ### ABI and extensible configuration structs
 
 - `wc_limits` is the canonical, struct_size-extensible limits struct.
   `wc_limits_init` sets `struct_size`; smaller values zero-fill missing
-  fields, larger values have extra bytes ignored.
+  fields, larger values have extra bytes ignored. Values below
+  `sizeof(size_t)` are invalid.
 - `wc_build_config` is similarly struct_size-extensible. `wc_build_info()`
   returns the canonical struct with sizes of key internal types to detect
   mismatches across translation units.

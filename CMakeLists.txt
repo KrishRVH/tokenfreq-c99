@@ -80,19 +80,26 @@ function(wc_apply_common target)
     endif()
   else()
     target_compile_options(${target} ${_opt_scope}
-      $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>
-      $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>
+      "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>"
+      "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>"
     )
     if(WC_WERROR)
       target_compile_options(${target} ${_opt_scope} -Werror)
     endif()
   endif()
 
+  foreach(_wc_def HASH_STRONG USE_LIBC_STRING ASCII_ONLY ENABLE_VALIDATE)
+    get_target_property(_wc_${_wc_def} ${target} WC_DEF_${_wc_def})
+    if(_wc_${_wc_def} STREQUAL "_wc_${_wc_def}-NOTFOUND")
+      set(_wc_${_wc_def} "$<IF:$<BOOL:${WC_${_wc_def}}>,1,0>")
+    endif()
+  endforeach()
+
   target_compile_definitions(${target} ${_def_scope}
-    WC_HASH_STRONG=$<IF:$<BOOL:${WC_HASH_STRONG}>,1,0>
-    WC_USE_LIBC_STRING=$<IF:$<BOOL:${WC_USE_LIBC_STRING}>,1,0>
-    WC_ASCII_ONLY=$<IF:$<BOOL:${WC_ASCII_ONLY}>,1,0>
-    WC_ENABLE_VALIDATE=$<IF:$<BOOL:${WC_ENABLE_VALIDATE}>,1,0>
+    WC_HASH_STRONG=${_wc_HASH_STRONG}
+    WC_USE_LIBC_STRING=${_wc_USE_LIBC_STRING}
+    WC_ASCII_ONLY=${_wc_ASCII_ONLY}
+    WC_ENABLE_VALIDATE=${_wc_ENABLE_VALIDATE}
   )
 
   # Visibility: default to hidden for shared libs, export via WC_API
@@ -262,9 +269,51 @@ if(BUILD_TESTING)
     create_test_variant(wc_test_tiny wordcount_lib_tiny)
   endif()
 
+  add_library(wordcount_lib_force_hash STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_force_hash PUBLIC WC_TEST_FORCE_HASH=1)
+  wc_apply_common(wordcount_lib_force_hash)
+  create_test_variant(wc_test_force_hash wordcount_lib_force_hash)
+
+  add_library(wordcount_lib_noheap STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_noheap PUBLIC
+    WC_NO_HEAP=1
+    WC_STACK_BUFFER=0
+  )
+  wc_apply_common(wordcount_lib_noheap)
+
+  add_executable(wc_test_noheap tests/noheap_static.c)
+  target_link_libraries(wc_test_noheap PRIVATE wordcount_lib_noheap)
+  wc_apply_common(wc_test_noheap)
+  add_test(NAME wc_test_noheap COMMAND wc_test_noheap)
+
+  add_library(wordcount_lib_noheap_nouintptr STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_noheap_nouintptr PUBLIC
+    WC_NO_HEAP=1
+    WC_STACK_BUFFER=0
+    WC_HAVE_UINTPTR=0
+    WC_TRUST_STATIC_BUFFER_ALIGNMENT=1
+  )
+  wc_apply_common(wordcount_lib_noheap_nouintptr)
+
+  add_executable(wc_test_noheap_nouintptr tests/noheap_static.c)
+  target_link_libraries(wc_test_noheap_nouintptr PRIVATE
+    wordcount_lib_noheap_nouintptr)
+  wc_apply_common(wc_test_noheap_nouintptr)
+  add_test(NAME wc_test_noheap_nouintptr COMMAND wc_test_noheap_nouintptr)
+
+  add_executable(wc_test_counter_overflow tests/counter_overflow.c)
+  set_target_properties(wc_test_counter_overflow PROPERTIES
+    WC_DEF_ENABLE_VALIDATE 1
+  )
+  wc_apply_common(wc_test_counter_overflow)
+  add_test(NAME wc_test_counter_overflow COMMAND wc_test_counter_overflow)
+
+  add_library(wordcount_lib_collision STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_collision PUBLIC WC_TEST_FORCE_HASH=1)
+  wc_apply_common(wordcount_lib_collision)
+
   add_executable(wc_test_collision wc_test_collision.c)
-  target_compile_definitions(wc_test_collision PRIVATE WC_TEST_FORCE_HASH=1)
-  target_link_libraries(wc_test_collision PRIVATE wordcount_lib)
+  target_link_libraries(wc_test_collision PRIVATE wordcount_lib_collision)
   wc_apply_common(wc_test_collision)
   add_test(NAME wc_test_collision COMMAND wc_test_collision)
 
@@ -277,8 +326,8 @@ if(BUILD_TESTING)
     WC_FREE=wc_fault_free
   )
   target_compile_options(wordcount_lib_fault PRIVATE
-    $<$<C_COMPILER_ID:MSVC>:/FIwc_fault_alloc.h>
-    $<$<NOT:$<C_COMPILER_ID:MSVC>>:-include wc_fault_alloc.h>
+    "$<$<C_COMPILER_ID:MSVC>:/FI${PROJECT_SOURCE_DIR}/wc_fault_alloc.h>"
+    "$<$<NOT:$<C_COMPILER_ID:MSVC>>:-include;${PROJECT_SOURCE_DIR}/wc_fault_alloc.h>"
   )
   wc_apply_common(wordcount_lib_fault)
 
@@ -296,8 +345,8 @@ if(BUILD_TESTING)
     WC_FREE=wc_fault_free
   )
   target_compile_options(wordcount_lib_fault_heap PRIVATE
-    $<$<C_COMPILER_ID:MSVC>:/FIwc_fault_alloc.h>
-    $<$<NOT:$<C_COMPILER_ID:MSVC>>:-include wc_fault_alloc.h>
+    "$<$<C_COMPILER_ID:MSVC>:/FI${PROJECT_SOURCE_DIR}/wc_fault_alloc.h>"
+    "$<$<NOT:$<C_COMPILER_ID:MSVC>>:-include;${PROJECT_SOURCE_DIR}/wc_fault_alloc.h>"
   )
   wc_apply_common(wordcount_lib_fault_heap)
 
@@ -327,6 +376,62 @@ if(BUILD_TESTING)
   endfunction()
 
   wc_add_compile_only(wc_compile_static_init tests/compile_static_init.c)
+  wc_add_compile_only(wc_compile_nouintptr wordcount.c)
+  target_compile_definitions(wc_compile_nouintptr PRIVATE
+    WC_HAVE_UINTPTR=0
+    WC_TRUST_STATIC_BUFFER_ALIGNMENT=1
+    WC_STACK_BUFFER=0
+  )
+  wc_add_compile_only(wc_compile_force_hash wordcount.c)
+  target_compile_definitions(wc_compile_force_hash PRIVATE WC_TEST_FORCE_HASH=1)
+  wc_add_compile_only(wc_compile_custom_uintptr wordcount.c)
+  target_compile_definitions(wc_compile_custom_uintptr PRIVATE
+    WC_U32_T=unsigned
+    WC_PTRDIFF_MAX=9223372036854775807L
+    WC_HAVE_UINTPTR=1
+  )
+  wc_add_compile_only(wc_compile_auto_uintptr wordcount.c)
+  target_compile_definitions(wc_compile_auto_uintptr PRIVATE
+    WC_U32_T=unsigned
+    WC_PTRDIFF_MAX=9223372036854775807L
+  )
+  add_library(wc_compile_noheap_libclight OBJECT wordcount.c)
+  set_target_properties(wc_compile_noheap_libclight PROPERTIES
+    WC_DEF_USE_LIBC_STRING 0
+  )
+  wc_apply_common(wc_compile_noheap_libclight)
+  if(MSVC)
+    target_compile_options(wc_compile_noheap_libclight PRIVATE /WX)
+  else()
+    target_compile_options(wc_compile_noheap_libclight PRIVATE -Werror)
+  endif()
+  target_compile_definitions(wc_compile_noheap_libclight PRIVATE
+    WC_STDC_HOSTED=0
+    WC_NO_HEAP=1
+    WC_STACK_BUFFER=0
+    WC_USE_LIBC_QSORT=0
+    WC_HAVE_ERRNO=0
+    WC_OMIT_ASSERT=1
+  )
+  add_library(wc_compile_noheap_libclight_nouintptr OBJECT wordcount.c)
+  set_target_properties(wc_compile_noheap_libclight_nouintptr PROPERTIES
+    WC_DEF_USE_LIBC_STRING 0
+  )
+  wc_apply_common(wc_compile_noheap_libclight_nouintptr)
+  if(MSVC)
+    target_compile_options(wc_compile_noheap_libclight_nouintptr PRIVATE /WX)
+  else()
+    target_compile_options(wc_compile_noheap_libclight_nouintptr PRIVATE -Werror)
+  endif()
+  target_compile_definitions(wc_compile_noheap_libclight_nouintptr PRIVATE
+    WC_STDC_HOSTED=0
+    WC_NO_HEAP=1
+    WC_STACK_BUFFER=0
+    WC_USE_LIBC_QSORT=0
+    WC_HAVE_ERRNO=0
+    WC_OMIT_ASSERT=1
+    WC_HAVE_UINTPTR=0
+  )
 
   if(CMAKE_CXX_COMPILER)
     wc_add_compile_only(wc_compile_cpp tests/compile_cpp.cpp)
@@ -341,8 +446,20 @@ if(BUILD_TESTING)
 
   add_custom_target(wc_compile_checks ALL)
   add_dependencies(wc_compile_checks wc_compile_static_init)
+  add_dependencies(wc_compile_checks wc_compile_nouintptr wc_compile_force_hash
+                   wc_compile_custom_uintptr wc_compile_auto_uintptr
+                   wc_compile_noheap_libclight
+                   wc_compile_noheap_libclight_nouintptr)
   if(TARGET wc_compile_cpp)
     add_dependencies(wc_compile_checks wc_compile_cpp)
+  endif()
+
+  if(WC_BUILD_CLI AND UNIX)
+    add_test(NAME wc_cli_output_errors
+      COMMAND ${CMAKE_COMMAND}
+        -DWC_EXE=$<TARGET_FILE:wc>
+        -DWC_TMP_DIR=${PROJECT_BINARY_DIR}/cli-output-errors
+        -P ${PROJECT_SOURCE_DIR}/tests/cli_output_errors.cmake)
   endif()
 endif()
 
@@ -401,9 +518,41 @@ if(WC_INSTALL)
   install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/${PROJECT_NAME})
 
   if(WC_INSTALL_PKGCONFIG)
+    if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}" OR
+       IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+      set(WC_PKGCONFIG_PREFIX "${CMAKE_INSTALL_PREFIX}")
+      set(WC_PKGCONFIG_LIBDIR "${CMAKE_INSTALL_FULL_LIBDIR}")
+      set(WC_PKGCONFIG_INCLUDEDIR "${CMAKE_INSTALL_FULL_INCLUDEDIR}/wordcount")
+    else()
+      set(WC_PKGCONFIG_PREFIX "\${pcfiledir}")
+      string(REPLACE "/" ";" _wc_pkgconfig_libdir_components
+        "${CMAKE_INSTALL_LIBDIR}")
+      foreach(_wc_pkgconfig_component IN LISTS _wc_pkgconfig_libdir_components)
+        if(NOT _wc_pkgconfig_component STREQUAL "")
+          set(WC_PKGCONFIG_PREFIX "${WC_PKGCONFIG_PREFIX}/..")
+        endif()
+      endforeach()
+      set(WC_PKGCONFIG_PREFIX "${WC_PKGCONFIG_PREFIX}/..")
+      set(WC_PKGCONFIG_LIBDIR "\${prefix}/${CMAKE_INSTALL_LIBDIR}")
+      set(WC_PKGCONFIG_INCLUDEDIR
+        "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}/wordcount")
+    endif()
     configure_file(${PROJECT_SOURCE_DIR}/cmake/wordcount.pc.in
       ${PROJECT_BINARY_DIR}/wordcount.pc @ONLY)
     install(FILES ${PROJECT_BINARY_DIR}/wordcount.pc
       DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+    if(BUILD_TESTING AND NOT ENABLE_SANITIZERS)
+      find_program(PKG_CONFIG_EXECUTABLE pkg-config)
+      if(PKG_CONFIG_EXECUTABLE)
+        add_test(NAME wc_pkgconfig_relocatable
+          COMMAND ${CMAKE_COMMAND}
+            -DWC_BUILD_DIR=${PROJECT_BINARY_DIR}
+            -DWC_INSTALL_PREFIX=${PROJECT_BINARY_DIR}/pkgconfig-relocatable
+            -DWC_PKGCONFIG_DIR=${CMAKE_INSTALL_LIBDIR}/pkgconfig
+            -DWC_PKG_CONFIG=${PKG_CONFIG_EXECUTABLE}
+            -DWC_C_COMPILER=${CMAKE_C_COMPILER}
+            -P ${PROJECT_SOURCE_DIR}/tests/pkgconfig_relocatable.cmake)
+      endif()
+    endif()
   endif()
 endif()

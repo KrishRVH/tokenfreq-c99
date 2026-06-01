@@ -3,11 +3,18 @@
 ## Usage
 
 ```
-wc [OPTIONS] [FILE|-]
+wc [OPTIONS] [FILE ...]
 ```
 
-Single file or `-` for stdin. Multiple files are processed independently and
-summarized; failures increment the exit status but do not abort other inputs.
+With no file operands, stdin is read. File operands are streamed and aggregated
+into a single result set. A literal `-` is not a stdin sentinel. Input failures
+are reported, later file operands are still attempted, and the final exit status
+is `1` if any input failed. When any input fails, normal result output is
+suppressed because the aggregate would be partial.
+
+The CLI requires the linked `wordcount` library to be hosted and heap-enabled.
+`--help` and `--version` still work with other linked configurations so build
+mismatches can be diagnosed.
 
 ## Exit Codes
 
@@ -18,35 +25,40 @@ summarized; failures increment the exit status but do not abort other inputs.
 ## Options
 
 - Output:
-  - `-n, --top N` – show top N words (default: 25; `0` prints only summaries).
+  - `-n, --top N` – show top N words (default: 25; N must be greater than 0
+    unless `--all` is set, in which case the top limit is ignored).
   - `--all` – show all unique words.
   - `--format {table,tsv,json}` – output format (default: table).
-  - `--summary` – always print summary totals.
+  - `--summary` – print summary totals (default; retained for explicitness).
   - `-q, --quiet` – suppress per-word listing; summary only.
   - `--color {auto,always,never}` / `--no-color`.
 - Parsing / limits:
   - `--min-len N`, `--max-len N` – filter results by displayed word length.
   - `--max-word N` – set library `max_word` (clamped to build-time `WC_MAX_WORD`).
-  - `--max-bytes BYTES` – cap internal memory (applies to table/arena/scanbuf).
-  - `--strict-max-bytes` – enforce `max_bytes` as a hard peak cap.
-  - `--no-mmap` – Force streaming for file inputs (disable memory mapping).
+  - `--max-bytes BYTES` – set the internal memory budget (table/arena/scanbuf).
+  - `--strict-max-bytes` – enforce that budget as a hard peak cap.
 - Misc:
   - `--version`
   - `-h, --help`
 
 ## Output Formats
 
-- `table` (default): width-aware columns with header/separator; counts are
-  right-aligned, words left-aligned. Ordering is always count desc, word asc.
-- `tsv`: header row `rank<TAB>count<TAB>word\n` followed by stable rows.
+- `table` (default): when rows are displayed, width-aware columns with
+  header/separator; counts are right-aligned, words left-aligned. Ordering is
+  always count desc, word asc. Summary prints to stdout.
+- `tsv`: when rows are displayed, header row `rank<TAB>count<TAB>word\n`
+  followed by stable rows. Summary prints to stderr.
 - `json`: object with keys `words` (array of `{rank,count,word}`) and
   `summary` (`total`, `unique`, `filtered`, `displayed`, `bytes`). Empty input
   yields an empty array.
 
-All data rows go to stdout; diagnostics go to stderr.
+Word rows and row headers go to stdout. Table summaries go to stdout; TSV
+summaries go to stderr; JSON writes the complete object to stdout. Diagnostics
+and the non-JSON, non-quiet "No words found." notice go to stderr.
 
 ## Examples
 
 - Top 10 words as TSV: `wc -n 10 --format tsv book.txt`
-- Full list with summary only: `wc --all --summary README.md`
-- Memory-capped run: `wc --max-bytes 262144 --strict-max-bytes data.txt`
+- Summary only: `wc -q README.md`
+- Full list with summary: `wc --all README.md`
+- Strict memory-capped run: `wc --max-bytes 262144 --strict-max-bytes data.txt`

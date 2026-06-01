@@ -15,8 +15,10 @@
 **   "word" as a maximal run of ASCII letters [A-Za-z]; other bytes are
 **   separators and case folding is ASCII-only. With WC_ASCII_ONLY=0,
 **   classification uses ctype (isalnum + apostrophe) under the caller's
-**   current locale; the library itself does not set locale. wc_add/wc_add_n
-**   accept arbitrary byte sequences and do not fold case.
+**   current locale; the library itself does not set locale. wc_scan accepts
+**   arbitrary byte sequences. wc_add/wc_add_n do not fold case and store the
+**   supplied bytes up to the first NUL; wc_add_norm_n does not tokenize and
+**   folds that same prefix according to the ASCII-vs-ctype build mode.
 **
 **   Maximum length: max_word is clamped into [4, WC_MAX_WORD]. Bytes
 **   beyond max_word are truncated (still counted); truncation never
@@ -28,10 +30,12 @@
 **   success and failure. errno is only touched on failures when
 **   WC_HAVE_ERRNO != 0. wc_errstr() yields stable, human-readable strings.
 **
-**   Ownership/lifetime: wc_word.word pointers returned by wc_results*()
-**   are owned by the wc instance and become invalid after wc_close().
-**   Arrays from wc_results* are caller-owned and must be freed with
-**   wc_results_free(). Streams are closed with wc_stream_close().
+**   Ownership/lifetime: wc_word.word pointers returned by wc_results() and
+**   wc_topn() are owned by the wc instance and become invalid after wc_close().
+**   Arrays returned by wc_results()/wc_topn() are caller-owned and must be freed
+**   with wc_results_free(). Streams are closed with wc_stream_close(). If wc_close()
+**   is called before an open stream is closed, the stream is detached: later
+**   scan/finish calls return WC_ERROR and wc_stream_close() remains safe.
 **
 **   Determinism/sorting: Results are sorted by count descending then
 **   bytewise word ascending; behavior is locale-independent in the
@@ -40,24 +44,31 @@
 **
 **   Public API functions: wc_open_ex, wc_open, wc_close, wc_handle_size, wc_add,
 **     wc_add_n, wc_add_norm_n, wc_scan, wc_total, wc_unique, wc_results,
-**     wc_results_into, wc_results_free, wc_topn, wc_topn_into, wc_reserve,
-**     wc_cursor_init, wc_cursor_next, wc_errstr, wc_version, wc_build_info,
-**     wc_get_stats, wc_validate, wc_stream_open, wc_stream_size,
-**     wc_stream_open_inplace, wc_stream_scan_ex, wc_stream_scan,
-**     wc_stream_finish, wc_stream_close.
+**     wc_results_free, wc_topn, wc_reserve, wc_cursor_init, wc_cursor_next,
+**     wc_errstr, wc_version, wc_build_info, wc_get_stats, wc_validate,
+**     wc_stream_open, wc_stream_size, wc_stream_open_inplace,
+**     wc_stream_scan_ex, wc_stream_scan, wc_stream_finish, wc_stream_close.
 **
 **   Public API helpers/macros: wc_limits_init, WC_LIMITS_INIT,
 **     WC_BUILD_CONFIG_INIT, WC_STATIC_BUFFER.
 **
-** STABILITY
+** PRE-SHIP POLICY
 **
-**   API is stable. Functions will not be removed or change signature.
-**   New functions may be added in minor/patch releases.
+**   This library has not shipped yet. The public surface is intentionally kept
+**   small and may be reduced before release if that removes unsafe contracts.
 */
 #ifndef WORDCOUNT_H
 #define WORDCOUNT_H
 
-#ifndef WC_STDC_HOSTED
+#ifdef WC_STDC_HOSTED
+#if (WC_STDC_HOSTED + 0)
+#undef WC_STDC_HOSTED
+#define WC_STDC_HOSTED 1
+#else
+#undef WC_STDC_HOSTED
+#define WC_STDC_HOSTED 0
+#endif
+#else
 #ifdef __STDC_HOSTED__
 #define WC_STDC_HOSTED __STDC_HOSTED__
 #else
@@ -98,12 +109,28 @@
 #endif
 
 /*
+** WC_OMIT_ASSERT:
+**   When 1, internal WC_ASSERT checks are compiled out and <assert.h> is not
+**   included. Defaults to 0 for hosted builds and 1 for freestanding builds.
+*/
+#ifndef WC_OMIT_ASSERT
+#if WC_STDC_HOSTED
+#define WC_OMIT_ASSERT 0
+#else
+#define WC_OMIT_ASSERT 1
+#endif
+#endif
+
+/*
 ** WC_NO_HEAP:
 **   When 1, the library is built in "no-heap" mode:
 **     - The compiled object does not reference WC_MALLOC/WC_FREE/WC_REALLOC.
 **     - wc_open() is unavailable; wc_open_ex() requires caller-provided storage via limits.
-**     - wc_results()/wc_topn()/wc_stream_open() are unavailable (return WC_NOMEM / NULL);
-**       use *_into, wc_cursor, and wc_stream_open_inplace().
+**     - wc_results()/wc_topn()/wc_stream_open() are unavailable (valid
+**       result-output calls with a valid handle return WC_NOMEM;
+**       wc_stream_open returns NULL);
+**       use wc_cursor, and use wc_stream_open_inplace() only when
+**       WC_HAVE_UINTPTR=1.
 */
 #ifndef WC_NO_HEAP
 #define WC_NO_HEAP 0
@@ -125,7 +152,7 @@
 #define WC_BOOL(x) ((x) != 0)
 #endif
 
-/* Normalize feature toggles to numeric 0/1 even if defined without a value. */
+/* Normalize feature toggles to numeric 0/1 after defaults are chosen. */
 #ifdef WC_HASH_STRONG
 #if (WC_HASH_STRONG + 0)
 #undef WC_HASH_STRONG
@@ -184,6 +211,18 @@
 #endif
 #else
 #define WC_ENABLE_VALIDATE 0
+#endif
+
+#ifdef WC_OMIT_ASSERT
+#if (WC_OMIT_ASSERT + 0)
+#undef WC_OMIT_ASSERT
+#define WC_OMIT_ASSERT 1
+#else
+#undef WC_OMIT_ASSERT
+#define WC_OMIT_ASSERT 0
+#endif
+#else
+#define WC_OMIT_ASSERT 0
 #endif
 
 #ifdef WC_NO_HEAP
@@ -371,7 +410,7 @@ extern "C" {
 */
 #define WC_OK 0
 #define WC_ERROR 1
-#define WC_NOMEM 2
+#define WC_NOMEM 2 /* resource exhausted: allocation, capacity, or counter */
 /*
 ** More specific error codes used by wc_open_ex / streaming APIs.
 ** (Other functions return only WC_OK/WC_ERROR/WC_NOMEM, except
@@ -468,6 +507,8 @@ extern "C" {
 **     - WC_U32_T must be an unsigned integer type of exactly 32 bits.
 **     - If WC_HASH_STRONG=1, WC_U64_T must be an unsigned integer type of exactly 64 bits.
 **   Defaults use <stdint.h> uint32_t/uint64_t.
+**   Targets without usable <stdint.h> should define WC_U32_T, WC_PTRDIFF_MAX,
+**   and WC_HAVE_UINTPTR=0 explicitly.
 */
 #ifndef WC_U32_T
 #include <stdint.h>
@@ -484,6 +525,23 @@ typedef WC_U32_T wc_u32;
 typedef WC_U64_T wc_u64;
 #endif
 
+#ifdef WC_HAVE_UINTPTR
+#if (WC_HAVE_UINTPTR + 0)
+#undef WC_HAVE_UINTPTR
+#define WC_HAVE_UINTPTR 1
+#else
+#undef WC_HAVE_UINTPTR
+#define WC_HAVE_UINTPTR 0
+#endif
+#else
+#include <stdint.h>
+#if defined(UINTPTR_MAX)
+#define WC_HAVE_UINTPTR 1
+#else
+#define WC_HAVE_UINTPTR 0
+#endif
+#endif
+
 /*
 ** Opaque word counter handle.
 */
@@ -492,19 +550,23 @@ typedef struct wc wc;
 ** Optional per-instance memory and sizing limits.
 **
 **   max_bytes:
-**     Hard cap on total internal allocations for this wc object when
-**     using the default dynamic allocator. The following pools are
-**     counted against this limit:
+**     Steady-state budget for internal allocations for this wc object when
+**     using the default dynamic allocator. If strict_max_bytes is non-zero,
+**     the same budget is enforced as a hard peak cap. The following pools are
+**     counted against this budget:
 **       - the hash table (Slot array and its growth)
 **       - the arena blocks used for word storage
 **       - the optional heap scan buffer when WC_STACK_BUFFER==0
 **
-**     Not counted against this limit:
+**     Not counted against this budget:
 **       - the wc handle itself when allocated outside the internal allocator
-**         (e.g., via WC_MALLOC, or placed by the caller in handle_buf),
+**         in separate handle storage (e.g., via WC_MALLOC, or caller-provided
+**         handle_buf that does not share static_buf),
 **       - arrays returned by wc_results() and wc_topn(),
 **       - the wc_stream object returned by wc_stream_open().
-**     These allocations are outside the wc allocator budget. 0 = unlimited.
+**     These allocations are outside the wc allocator budget. In non-strict
+**     dynamic mode, table growth may transiently exceed max_bytes if the
+**     post-growth footprint fits. 0 = unlimited.
 **
 **   init_cap:
 **     Initial hash table capacity (number of slots). Must be > 0.
@@ -528,21 +590,35 @@ typedef struct wc wc;
 **         with alignment chosen to be safe for the internal types
 **         used by the library.
 **
-**       - The buffer must be suitably aligned; on hosted
-**         implementations, alignment at least as strict as that of
-**         void*, size_t, unsigned long, and long double is sufficient.
-**         Static-buffer mode requires uintptr_t; misaligned buffers are
-**         rejected at runtime.
+**       - The buffer must be suitably aligned; on hosted implementations,
+**         alignment at least as strict as that of void*, size_t, unsigned long,
+**         and long double is sufficient. When uintptr_t is available,
+**         misaligned buffers are rejected at runtime. Without uintptr_t,
+**         static-buffer mode is rejected unless
+**         WC_TRUST_STATIC_BUFFER_ALIGNMENT=1; in that trust mode, alignment of
+**         static_buf and handle_buf is a caller precondition and cannot be
+**         verified at runtime. That trust mode does not enable
+**         wc_stream_open_inplace() without uintptr_t; in-place stream storage
+**         still requires pointer-range checks because non-overlap must be
+**         verified.
 **
 **       - The buffer must remain valid and must not be shared with
 **         another wc instance for its entire lifetime.
+**
+**       - If handle_buf also uses this storage, it must be exactly equal to
+**         static_buf. Partial overlap in either direction is invalid. Separate
+**         non-overlapping buffers are allowed only when pointer-range checks
+**         are available.
+**         In WC_NO_HEAP=1 builds, omitting handle_buf places the handle at
+**         static_buf and charges its aligned footprint to this buffer.
 **
 **       - max_bytes, if non-zero, is treated as an additional guard
 **         and is clamped to static_size when computing initial
 **         sizing.
 **
 **     The wc handle itself is allocated via WC_MALLOC/WC_FREE unless the caller
-**     provides limits.handle_buf. When WC_NO_HEAP=0, arrays returned by
+**     provides limits.handle_buf. In WC_NO_HEAP=1 builds, omitting handle_buf
+**     places the handle at static_buf. When WC_NO_HEAP=0, arrays returned by
 **     wc_results()/wc_topn() and stream objects returned by wc_stream_open()
 **     are allocated via WC_MALLOC/WC_FREE.
 **
@@ -578,7 +654,8 @@ typedef struct wc_limits {
      * Compatibility contract (append-only struct):
      *   - If struct_size < sizeof(wc_limits), missing tail fields are treated as 0.
      *   - If struct_size > sizeof(wc_limits), extra tail bytes are ignored.
-     *   - struct_size must be non-zero.
+     *   - struct_size must be at least sizeof(size_t), because struct_size is
+     *     the required first field read from caller storage.
      *
      * wc_limits_init()/WC_LIMITS_INIT() set struct_size to sizeof(wc_limits)
      * for this header.
@@ -603,9 +680,10 @@ typedef struct wc_limits {
 
     /* Optional caller-provided storage for the wc handle itself. If both
        handle_buf and handle_size are non-zero, the library will place the
-       wc struct there instead of calling WC_MALLOC. If handle_buf aliases
-       static_buf, it must start at static_buf and its footprint counts
-       against the static budget. */
+       wc struct there instead of calling WC_MALLOC. If handle_buf shares
+       storage with static_buf, it must be exactly equal to static_buf and its
+       aligned footprint counts against the static budget. Partial overlap in
+       either direction is invalid. */
     void *handle_buf;
     size_t handle_size;
 } wc_limits;
@@ -676,6 +754,11 @@ typedef struct wc_word {
 **   sizeof_wc / sizeof_slot / sizeof_wc_limits:
 **     Sizes of key internal types used when this library was built,
 **     useful for diagnosing header/library mismatches.
+**
+**   hosted / use_libc_string / use_libc_qsort / have_errno / ascii_only /
+**   stream_reuse_scanbuf / no_heap / hash_strong / have_uintptr /
+**   trust_static_buffer_alignment:
+**     Normalized build-time feature toggles for the compiled library.
 */
 typedef struct wc_build_config {
     size_t struct_size;
@@ -685,10 +768,21 @@ typedef struct wc_build_config {
     size_t min_block_sz;
     int stack_buffer;
 
-    /* Extra introspection for diagnosing mismatches and ABI expectations */
+    /* Original size fields; new fields are appended after these. */
     size_t sizeof_wc;
     size_t sizeof_slot;
     size_t sizeof_wc_limits;
+
+    int hosted;
+    int use_libc_string;
+    int use_libc_qsort;
+    int have_errno;
+    int ascii_only;
+    int stream_reuse_scanbuf;
+    int no_heap;
+    int hash_strong;
+    int have_uintptr;
+    int trust_static_buffer_alignment;
 } wc_build_config;
 
 /* WC_BUILD_CONFIG_INIT: constant initializer for static storage in C;
@@ -705,7 +799,17 @@ typedef struct wc_build_config {
                 0,               /* stack_buffer */     \
                 0,               /* sizeof_wc */        \
                 0,               /* sizeof_slot */      \
-                0                /* sizeof_wc_limits */ \
+                0,               /* sizeof_wc_limits */ \
+                0,               /* hosted */           \
+                0,               /* use_libc_string */  \
+                0,               /* use_libc_qsort */   \
+                0,               /* have_errno */       \
+                0,               /* ascii_only */       \
+                0,               /* stream_reuse */     \
+                0,               /* no_heap */          \
+                0,               /* hash_strong */      \
+                0,               /* have_uintptr */     \
+                0                /* trust_alignment */  \
     }
 #else
 #define WC_BUILD_CONFIG_INIT()                 \
@@ -810,16 +914,12 @@ WC_API size_t wc_unique(const wc *w);
 ** static buffer provided via wc_limits.static_buf, since its
 ** lifetime is entirely under the caller's control.
 **
-** When WC_NO_HEAP=1, this function returns WC_NOMEM unconditionally;
-** use wc_results_into with caller-supplied storage instead.
+** When WC_NO_HEAP=1, this function returns WC_NOMEM when output arguments are
+** valid; bad arguments still return WC_ERROR. Use wc_cursor instead.
 */
 WC_API WC_WUR int
 wc_results(const wc *w, wc_word **WC_RESTRICT out, size_t *WC_RESTRICT n);
 
-/* Zero-allocation variants. Query mode: out==NULL or out_cap==0 sets out_n to
-   required length and returns WC_OK. */
-WC_API WC_WUR int
-wc_results_into(const wc *w, wc_word *out, size_t out_cap, size_t *out_n);
 /*
 ** Free results array. NULL-safe.
 */
@@ -832,16 +932,14 @@ WC_API void wc_results_free(wc_word *r);
 ** provided via wc_limits.static_buf, since its lifetime is under the caller's
 ** control.
 **
-** When WC_NO_HEAP=1, returns WC_NOMEM unconditionally; use
-** wc_topn_into with caller-supplied storage instead.
+** When WC_NO_HEAP=1, returns WC_NOMEM when output arguments are valid; bad
+** arguments still return WC_ERROR. Use wc_cursor and sort externally if a
+** sorted result is required.
 */
 WC_API WC_WUR int wc_topn(const wc *w,
                           size_t n,
                           wc_word **WC_RESTRICT out,
                           size_t *WC_RESTRICT out_n);
-
-WC_API WC_WUR int wc_topn_into(
-        const wc *w, size_t n, wc_word *out, size_t out_cap, size_t *out_n);
 
 /*
 ** -------------------------------------------------------------------------
@@ -898,7 +996,9 @@ WC_API const wc_build_config *wc_build_info(void);
 /* Runtime stats for allocator/capacity observability. */
 WC_API WC_WUR int wc_get_stats(const wc *w, wc_stats *out);
 
-/* Preflight/reserve capacity to reduce early WC_NOMEM. */
+/* Best-effort preflight/growth helper to reduce early WC_NOMEM. It is not a
+   success guarantee for future insertions; callers must still handle WC_NOMEM
+   from insertion and scanning APIs. */
 WC_API WC_WUR int
 wc_reserve(wc *w, size_t expected_unique, size_t expected_bytes);
 
@@ -918,8 +1018,9 @@ WC_API WC_WUR int wc_validate(const wc *w);
 **   - Tokenization, normalization, and truncation match wc_scan() exactly.
 **   - With WC_ASCII_ONLY=1 (default), a word is [A-Za-z]+ and all other bytes are separators.
 **   - With WC_ASCII_ONLY=0, word bytes are (isalnum || apostrophe) under the active C locale.
-**   - Error handling differs from wc_scan(): on error, scan_ex reports partial consumption and
-**     discards the failing word to allow forward progress.
+**   - Error handling differs from wc_scan(): when an active stream reaches a
+**     separator and insertion of the buffered word fails, scan_ex reports
+**     partial consumption and discards that word to allow forward progress.
 */
 typedef struct wc_stream wc_stream;
 
@@ -929,10 +1030,20 @@ typedef struct wc_stream wc_stream;
 **   Returns NULL on failure and stores a code in *err_out when provided.
 **   When WC_NO_HEAP=1, always returns NULL with *err_out = WC_NOMEM; use
 **   wc_stream_open_inplace().
+**   If the parent wc is closed before the stream, the stream is detached:
+**   later scan/finish calls return WC_ERROR and wc_stream_close() remains safe.
 **
 ** wc_stream_open_inplace:
-**   Uses caller-provided storage. On mem_size < wc_stream_size(w), fails with
-**   WC_NOMEM (and errno may be set when WC_HAVE_ERRNO!=0).
+**   Uses caller-provided storage. Without uintptr_t, this function always fails
+**   with WC_EBADLIMITS because non-overlap cannot be verified. When uintptr_t
+**   is available, mem_size < wc_stream_size(w) fails with WC_NOMEM, misaligned
+**   storage fails with WC_EALIGN, and overlap with the parent wc, its internal
+**   allocations, or active streams fails with WC_EBADLIMITS. Storage must remain
+**   valid for every call that uses the stream pointer, including
+**   wc_stream_close(). If the parent wc is closed first, the library holds no
+**   further references to the storage; callers may reuse it only if they will
+**   not call stream APIs with that pointer again. Use WC_STATIC_BUFFER for
+**   portable alignment.
 */
 WC_API wc_stream *wc_stream_open(wc *w, int *err_out);
 WC_API size_t wc_stream_size(const wc *w);
@@ -941,10 +1052,13 @@ wc_stream_open_inplace(wc *w, void *mem, size_t mem_size, int *err_out);
 
 /*
 ** Scan a chunk. consumed_out (optional) receives the number of bytes
-** consumed before returning. On WC_OK, consumed_out == len.
-** On WC_NOMEM/WC_ERROR, the stream remains valid; the failing word is
-** discarded and the separator is consumed so callers can continue with
-** remaining bytes if desired.
+** consumed before returning. On WC_OK before finish, consumed_out == len.
+** After wc_stream_finish(), scanning returns the saved finish status and
+** leaves consumed_out at 0.
+** If insertion of a buffered word fails while scanning a separator, the stream
+** remains valid; that word is discarded and the separator is consumed so callers
+** can continue with remaining bytes if desired. WC_ERROR from invalid arguments,
+** detached streams, or oversized chunks does not provide forward progress.
 */
 WC_API WC_WUR int wc_stream_scan_ex(wc_stream *s,
                                     const char *WC_RESTRICT buf,
@@ -955,7 +1069,9 @@ WC_API WC_WUR int wc_stream_scan_ex(wc_stream *s,
 WC_API WC_WUR int
 wc_stream_scan(wc_stream *s, const char *WC_RESTRICT buf, size_t len);
 
-/* Finish stream: inserts any trailing in-progress word (idempotent). */
+/* Finish stream: inserts any trailing in-progress word (idempotent). Closing a
+   stream does not finish it; call wc_stream_finish first when the trailing word
+   should be counted. */
 WC_API WC_WUR int wc_stream_finish(wc_stream *s);
 
 WC_API void wc_stream_close(wc_stream *s);

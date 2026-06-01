@@ -1,0 +1,2 @@
+# Exclude the benchmark harness from GitHub Linguist language statistics.
+benchmark/bench.sh linguist-vendored
