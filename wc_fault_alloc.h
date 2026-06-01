@@ -5,9 +5,9 @@
 
 void fault_reset(void);
 void fault_arm(int n);
+int fault_null_free_count(void);
 
 void *wc_fault_malloc(size_t n);
-void *wc_fault_realloc(void *p, size_t n);
 void wc_fault_free(void *p);
 
 #endif /* WC_FAULT_ALLOC_H */

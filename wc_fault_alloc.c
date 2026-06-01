@@ -6,6 +6,7 @@
 static int g_fail_target = 0;
 static int g_alloc_count = 0;
 static int g_active = 0;
+static int g_null_free_count = 0;
 
 void fault_reset(void)
 {
@@ -19,6 +20,11 @@ void fault_arm(int n)
     g_fail_target = n;
     g_alloc_count = 0;
     g_active = 1;
+}
+
+int fault_null_free_count(void)
+{
+    return g_null_free_count;
 }
 
 static int fault_should_fail(void)
@@ -42,16 +48,11 @@ void *wc_fault_malloc(size_t n)
     return malloc(n);
 }
 
-void *wc_fault_realloc(void *p, size_t n)
-{
-    if (fault_should_fail()) {
-        errno = ENOMEM;
-        return NULL;
-    }
-    return realloc(p, n);
-}
-
 void wc_fault_free(void *p)
 {
+    if (!p) {
+        g_null_free_count++;
+        return;
+    }
     free(p);
 }

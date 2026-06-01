@@ -332,8 +332,8 @@ write_bench_c() {
  * Modes:
  *   scan          : mmap + wc_scan
  *   scan_results  : mmap + wc_scan + wc_results (sort) + free
- *   stream        : read() + wc_stream_scan + finish
- *   stream_results: read() + wc_stream_scan + finish + wc_results + free
+ *   stream        : read() + wc_stream_scan_ex + finish
+ *   stream_results: read() + wc_stream_scan_ex + finish + wc_results + free
  *
  * Output:
  *   By default prints: "Total: <n> Unique: <n>\n" to stdout
@@ -398,8 +398,6 @@ static void print_build_info(void) {
     if (!cfg) return;
     fprintf(stderr, "bench_wc: build_info: version=%lu max_word=%zu min_init_cap=%zu min_block_sz=%zu stack_buffer=%d\n",
             cfg->version_number, cfg->max_word, cfg->min_init_cap, cfg->min_block_sz, cfg->stack_buffer);
-    fprintf(stderr, "bench_wc: build_info: sizeof_wc=%zu sizeof_slot=%zu sizeof_wc_limits=%zu\n",
-            cfg->sizeof_wc, cfg->sizeof_slot, cfg->sizeof_wc_limits);
 }
 
 static int run_scan(const char *path, wc *w, int do_results, int quiet) {
@@ -501,9 +499,14 @@ static int run_stream(const char *path, wc *w, int do_results, size_t chunk, int
         ssize_t n = read(fd, buf, chunk);
         if (n < 0) die("read");
         if (n == 0) break;
-        rc = wc_stream_scan(s, (const char *)buf, (size_t)n);
+        {
+            size_t consumed = 0;
+            rc = wc_stream_scan_ex(s, (const char *)buf, (size_t)n, &consumed);
+            if (rc == WC_OK && consumed != (size_t)n)
+                rc = WC_ERROR;
+        }
         if (rc != WC_OK) {
-            fprintf(stderr, "bench_wc: wc_stream_scan failed: %s\n", wc_errstr(rc));
+            fprintf(stderr, "bench_wc: wc_stream_scan_ex failed: %s\n", wc_errstr(rc));
             wc_stream_close(s);
             close(fd);
             free(buf);
@@ -964,6 +967,7 @@ int main(int argc, char **argv) {
         else path = a;
     }
     if (!path) usage();
+    if (maxw == 0) maxw = 64;
     if (maxw < 4) maxw = 4;
     if (maxw > 1024) maxw = 1024; /* toy clamp */
 

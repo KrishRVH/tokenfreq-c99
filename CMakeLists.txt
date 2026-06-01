@@ -13,7 +13,6 @@ option(WC_BUILD_SHARED "Build shared libraries (in addition to static)" OFF)
 option(WC_INSTALL_PKGCONFIG "Install pkg-config metadata when WC_INSTALL is ON" ON)
 option(WC_HASH_STRONG "Use keyed SipHash-2-4 instead of FNV-1a" OFF)
 option(WC_USE_LIBC_STRING "Use libc string/memory functions" ON)
-option(WC_ASCII_ONLY "Restrict scanning to ASCII letters" ON)
 option(WC_ENABLE_VALIDATE "Compile wc_validate() invariant checks" OFF)
 option(WC_BUILD_VARIANTS "Build heap/tiny library variants (same symbols; do not link together)" OFF)
 
@@ -88,7 +87,7 @@ function(wc_apply_common target)
     endif()
   endif()
 
-  foreach(_wc_def HASH_STRONG USE_LIBC_STRING ASCII_ONLY ENABLE_VALIDATE)
+  foreach(_wc_def HASH_STRONG USE_LIBC_STRING ENABLE_VALIDATE)
     get_target_property(_wc_${_wc_def} ${target} WC_DEF_${_wc_def})
     if(_wc_${_wc_def} STREQUAL "_wc_${_wc_def}-NOTFOUND")
       set(_wc_${_wc_def} "$<IF:$<BOOL:${WC_${_wc_def}}>,1,0>")
@@ -98,7 +97,6 @@ function(wc_apply_common target)
   target_compile_definitions(${target} ${_def_scope}
     WC_HASH_STRONG=${_wc_HASH_STRONG}
     WC_USE_LIBC_STRING=${_wc_USE_LIBC_STRING}
-    WC_ASCII_ONLY=${_wc_ASCII_ONLY}
     WC_ENABLE_VALIDATE=${_wc_ENABLE_VALIDATE}
   )
 
@@ -270,7 +268,10 @@ if(BUILD_TESTING)
   endif()
 
   add_library(wordcount_lib_force_hash STATIC wordcount.c)
-  target_compile_definitions(wordcount_lib_force_hash PUBLIC WC_TEST_FORCE_HASH=1)
+  target_compile_definitions(wordcount_lib_force_hash PRIVATE
+    WC_INTERNAL_TESTING=1
+    WC_INTERNAL_TEST_FORCE_HASH=1
+  )
   wc_apply_common(wordcount_lib_force_hash)
   create_test_variant(wc_test_force_hash wordcount_lib_force_hash)
 
@@ -309,7 +310,10 @@ if(BUILD_TESTING)
   add_test(NAME wc_test_counter_overflow COMMAND wc_test_counter_overflow)
 
   add_library(wordcount_lib_collision STATIC wordcount.c)
-  target_compile_definitions(wordcount_lib_collision PUBLIC WC_TEST_FORCE_HASH=1)
+  target_compile_definitions(wordcount_lib_collision PRIVATE
+    WC_INTERNAL_TESTING=1
+    WC_INTERNAL_TEST_FORCE_HASH=1
+  )
   wc_apply_common(wordcount_lib_collision)
 
   add_executable(wc_test_collision wc_test_collision.c)
@@ -317,12 +321,11 @@ if(BUILD_TESTING)
   wc_apply_common(wc_test_collision)
   add_test(NAME wc_test_collision COMMAND wc_test_collision)
 
-  # Portable fault-injection (malloc/realloc failures at every site)
+  # Portable fault-injection (malloc failures at every site)
   add_library(wordcount_lib_fault STATIC wordcount.c)
   target_sources(wordcount_lib_fault PRIVATE wc_fault_alloc.c)
   target_compile_definitions(wordcount_lib_fault PUBLIC
     WC_MALLOC=wc_fault_malloc
-    WC_REALLOC=wc_fault_realloc
     WC_FREE=wc_fault_free
   )
   target_compile_options(wordcount_lib_fault PRIVATE
@@ -341,7 +344,6 @@ if(BUILD_TESTING)
   target_compile_definitions(wordcount_lib_fault_heap PUBLIC
     WC_STACK_BUFFER=0
     WC_MALLOC=wc_fault_malloc
-    WC_REALLOC=wc_fault_realloc
     WC_FREE=wc_fault_free
   )
   target_compile_options(wordcount_lib_fault_heap PRIVATE
@@ -383,7 +385,10 @@ if(BUILD_TESTING)
     WC_STACK_BUFFER=0
   )
   wc_add_compile_only(wc_compile_force_hash wordcount.c)
-  target_compile_definitions(wc_compile_force_hash PRIVATE WC_TEST_FORCE_HASH=1)
+  target_compile_definitions(wc_compile_force_hash PRIVATE
+    WC_INTERNAL_TESTING=1
+    WC_INTERNAL_TEST_FORCE_HASH=1
+  )
   wc_add_compile_only(wc_compile_custom_uintptr wordcount.c)
   target_compile_definitions(wc_compile_custom_uintptr PRIVATE
     WC_U32_T=unsigned

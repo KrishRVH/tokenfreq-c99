@@ -65,7 +65,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     const char *buf = (const char *)&data[i];
     size_t len = size - i;
 
-    (void)wc_scan(a, buf, len);
+    if (wc_scan(a, buf, len) != WC_OK) {
+        wc_close(a);
+        wc_close(b);
+        return 0;
+    }
 
     int open_rc = WC_OK;
     wc_stream *s = wc_stream_open(b, &open_rc);
@@ -84,10 +88,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (step > len - off)
             step = len - off;
 
-        (void)wc_stream_scan(s, buf + off, step);
+        {
+            size_t consumed = 0;
+            int rc = wc_stream_scan_ex(s, buf + off, step, &consumed);
+            if (rc != WC_OK || consumed != step) {
+                wc_stream_close(s);
+                wc_close(a);
+                wc_close(b);
+                return 0;
+            }
+        }
         off += step;
     }
-    (void)wc_stream_finish(s);
+    if (wc_stream_finish(s) != WC_OK) {
+        wc_stream_close(s);
+        wc_close(a);
+        wc_close(b);
+        return 0;
+    }
     wc_stream_close(s);
 
     if (!results_equal_sorted(a, b))

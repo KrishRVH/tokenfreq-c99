@@ -38,10 +38,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef WC_TEST_FORCE_HASH
-#define WC_TEST_FORCE_HASH 0
-#endif
-
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define WC_TEST_ALIGNOF(T) _Alignof(T)
 #elif defined(__GNUC__) || defined(__clang__)
@@ -215,7 +211,7 @@ static int test_static_buf_misaligned_rejected(void)
 
     TEST("static_buf: misaligned buffer rejected");
 
-#if !WC_BOOL(WC_HAVE_UINTPTR) && WC_BOOL(WC_TRUST_STATIC_BUFFER_ALIGNMENT)
+#if !(WC_HAVE_UINTPTR + 0) && (WC_TRUST_STATIC_BUFFER_ALIGNMENT + 0)
     (void)lim;
     (void)pool.buf;
     PASS();
@@ -431,6 +427,105 @@ static int test_static_accepts_one_max_word(void)
     return 0;
 }
 
+static int test_static_default_arena_uses_remaining_budget(void)
+{
+    WC_TEST_STATIC_BUF(pool, 8192);
+    wc_limits lim = WC_LIMITS_INIT();
+    wc *w;
+    int rc = WC_OK;
+    char word[16];
+
+    TEST("static_buf: default arena uses remaining budget");
+
+    lim.static_buf = pool.buf;
+    lim.static_size = sizeof pool.buf;
+
+    w = wc_open_ex(8, &lim, &rc);
+    ASSERT(w != NULL);
+    ASSERT(rc == WC_OK);
+
+    for (size_t i = 0; i < 80; i++) {
+        (void)snprintf(word, sizeof word, "w%03zu", i);
+        ASSERT(wc_add(w, word) == WC_OK);
+    }
+    ASSERT(wc_unique(w) == 80);
+    ASSERT(invariant_cursor_sum_matches_total(w));
+
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
+static int infer_slot_size(size_t *out)
+{
+    wc_limits lim;
+    wc_stats a_st;
+    wc_stats b_st;
+    wc *a = NULL;
+    wc *b = NULL;
+    int ok = 0;
+
+    if (!out)
+        return 0;
+
+    wc_limits_init(&lim);
+    lim.init_cap = 16;
+    lim.block_size = 4096;
+    a = wc_open_ex(8, &lim, NULL);
+    if (!a || wc_get_stats(a, &a_st) != WC_OK)
+        goto done;
+
+    lim.init_cap = 32;
+    b = wc_open_ex(8, &lim, NULL);
+    if (!b || wc_get_stats(b, &b_st) != WC_OK)
+        goto done;
+
+    if (b_st.cap <= a_st.cap || b_st.bytes_used <= a_st.bytes_used)
+        goto done;
+    if ((b_st.bytes_used - a_st.bytes_used) % (b_st.cap - a_st.cap) != 0)
+        goto done;
+
+    *out = (b_st.bytes_used - a_st.bytes_used) / (b_st.cap - a_st.cap);
+    ok = *out > 0;
+
+done:
+    wc_close(a);
+    wc_close(b);
+    return ok;
+}
+
+static int test_static_explicit_block_size_is_honored(void)
+{
+    WC_TEST_STATIC_BUF(pool, 8192);
+    wc_limits lim = WC_LIMITS_INIT();
+    wc_stats st;
+    wc *w;
+    int rc = WC_OK;
+    size_t table_bytes;
+
+    TEST("static_buf: explicit block_size is honored");
+
+    ASSERT(infer_slot_size(&table_bytes));
+
+    lim.static_buf = pool.buf;
+    lim.static_size = sizeof pool.buf;
+    lim.init_cap = 128;
+    lim.block_size = 3000;
+
+    w = wc_open_ex(8, &lim, &rc);
+    ASSERT(w != NULL);
+    ASSERT(rc == WC_OK);
+    ASSERT(wc_get_stats(w, &st) == WC_OK);
+
+    table_bytes *= st.cap;
+    ASSERT(st.cap == 128);
+    ASSERT(st.bytes_used >= table_bytes + lim.block_size);
+
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
 static int test_grow_preserves_existing_keys(void)
 {
     wc_limits lim;
@@ -634,123 +729,8 @@ static int test_limits_invalid_combinations(void)
     ASSERT(wc_open_ex(0, &lim, &rc) == NULL);
     ASSERT(rc == WC_EBADLIMITS);
 
-    /* handle_buf without handle_size */
-    wc_limits_init(&lim);
-    {
-        static WC_TEST_STATIC_BUF(dummy2, WC_TEST_ALIGN);
-        lim.handle_buf = dummy2.buf;
-    }
-    lim.handle_size = 0;
-    ASSERT(wc_open_ex(0, &lim, &rc) == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-
-    /* handle_size without handle_buf */
-    wc_limits_init(&lim);
-    lim.handle_buf = NULL;
-    lim.handle_size = wc_handle_size();
-    ASSERT(wc_open_ex(0, &lim, &rc) == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-
     PASS();
     return 0;
-}
-
-static int test_handle_buf_static_buf_alias_rules(void)
-{
-#if defined(UINTPTR_MAX)
-    WC_TEST_STATIC_BUF(pool, 4096);
-    WC_TEST_STATIC_BUF(handle2, 4096);
-    WC_TEST_STATIC_BUF(tiny, 32);
-    wc_limits lim = WC_LIMITS_INIT();
-    wc *w;
-    int rc = WC_OK;
-    size_t off;
-
-    TEST("limits: handle_buf/static_buf alias rules");
-
-    /* handle_buf inside static range but not equal to static_buf => reject */
-    wc_limits_init(&lim);
-    lim.static_buf = pool.buf;
-    lim.static_size = sizeof pool.buf;
-    lim.handle_buf = (void *)(pool.buf + WC_TEST_ALIGN);
-    lim.handle_size = wc_handle_size();
-    w = wc_open_ex(0, &lim, &rc);
-    ASSERT(w == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-
-    /* static_buf inside handle range but not equal to handle_buf => reject */
-    wc_limits_init(&lim);
-    lim.static_buf = (void *)(pool.buf + WC_TEST_ALIGN);
-    lim.static_size = sizeof pool.buf - WC_TEST_ALIGN;
-    lim.handle_buf = pool.buf;
-    lim.handle_size = wc_handle_size();
-    w = wc_open_ex(0, &lim, &rc);
-    ASSERT(w == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-
-    /* handle at static start but static storage too small => reject before write */
-    wc_limits_init(&lim);
-    lim.static_buf = tiny.buf;
-    lim.static_size = sizeof tiny.buf;
-    lim.handle_buf = tiny.buf;
-    lim.handle_size = wc_handle_size();
-    w = wc_open_ex(0, &lim, &rc);
-    ASSERT(w == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-
-    /* handle_buf == static_buf => ok (counts against static budget) */
-    wc_limits_init(&lim);
-    lim.static_buf = pool.buf;
-    lim.static_size = sizeof pool.buf;
-    lim.handle_buf = pool.buf;
-    lim.handle_size = wc_handle_size();
-    w = wc_open_ex(0, &lim, &rc);
-    ASSERT(w != NULL);
-    ASSERT(rc == WC_OK);
-    wc_close(w);
-
-    /* Non-overlapping ranges are accepted only when pointer ranges are provable. */
-    off = wc_handle_size();
-    off = ((off + WC_TEST_ALIGN - 1u) / WC_TEST_ALIGN) * WC_TEST_ALIGN;
-    ASSERT(off < sizeof pool.buf);
-    wc_limits_init(&lim);
-    lim.static_buf = (void *)(pool.buf + off);
-    lim.static_size = sizeof pool.buf - off;
-    lim.handle_buf = pool.buf;
-    lim.handle_size = wc_handle_size();
-    w = wc_open_ex(0, &lim, &rc);
-#if WC_BOOL(WC_HAVE_UINTPTR)
-    ASSERT(w != NULL);
-    ASSERT(rc == WC_OK);
-    wc_close(w);
-#else
-    ASSERT(w == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-#endif
-
-    /* Separate handle/static buffers are accepted only with pointer-range checks. */
-    wc_limits_init(&lim);
-    lim.static_buf = pool.buf;
-    lim.static_size = sizeof pool.buf;
-    lim.handle_buf = handle2.buf;
-    lim.handle_size = wc_handle_size();
-    w = wc_open_ex(0, &lim, &rc);
-#if WC_BOOL(WC_HAVE_UINTPTR)
-    ASSERT(w != NULL);
-    ASSERT(rc == WC_OK);
-    wc_close(w);
-#else
-    ASSERT(w == NULL);
-    ASSERT(rc == WC_EBADLIMITS);
-#endif
-
-    PASS();
-    return 0;
-#else
-    TEST("limits: handle_buf/static_buf alias rules");
-    PASS();
-    return 0;
-#endif
 }
 
 static int test_open_ex_misaligned_rejected_reason(void)
@@ -760,7 +740,7 @@ static int test_open_ex_misaligned_rejected_reason(void)
     WC_TEST_STATIC_BUF(pool, 4096 + 64);
 
     TEST("open_ex static_buf misalignment returns EALIGN");
-#if !WC_BOOL(WC_HAVE_UINTPTR) && WC_BOOL(WC_TRUST_STATIC_BUFFER_ALIGNMENT)
+#if !(WC_HAVE_UINTPTR + 0) && (WC_TRUST_STATIC_BUFFER_ALIGNMENT + 0)
     (void)lim;
     (void)rc;
     (void)pool.buf;
@@ -806,6 +786,15 @@ static int results_equal_sorted(const wc *a, const wc *b)
     return i == na;
 }
 
+static int stream_scan_all(wc_stream *s, const char *text, size_t len)
+{
+    size_t consumed = 0;
+    int rc = wc_stream_scan_ex(s, text, len, &consumed);
+    if (rc != WC_OK)
+        return rc;
+    return consumed == len ? WC_OK : WC_ERROR;
+}
+
 static int test_stream_matches_wc_scan_various_chunks(void)
 {
     /* Includes separators, mixed case, and embedded NUL. */
@@ -832,7 +821,7 @@ static int test_stream_matches_wc_scan_various_chunks(void)
             size_t n = L - off;
             if (n > chunk)
                 n = chunk;
-            ASSERT(wc_stream_scan(s, (const char *)text + off, n) == WC_OK);
+            ASSERT(stream_scan_all(s, (const char *)text + off, n) == WC_OK);
             off += n;
         }
         ASSERT(wc_stream_finish(s) == WC_OK);
@@ -901,15 +890,14 @@ static int test_stream_nomem_allows_continue(void)
     return 0;
 }
 
-static int test_stream_reuse_blocks_double_open(void)
+static int test_stream_allows_multiple_active_streams(void)
 {
-#if WC_STREAM_REUSE_SCANBUF
     wc *w;
     wc_stream *a;
     wc_stream *b;
     int rc = WC_OK;
 
-    TEST("stream reuse enforces single active stream");
+    TEST("stream: multiple active streams keep independent buffers");
 
     w = wc_open(0);
     ASSERT(w != NULL);
@@ -919,17 +907,21 @@ static int test_stream_reuse_blocks_double_open(void)
 
     rc = WC_OK;
     b = wc_stream_open(w, &rc);
-    ASSERT(b == NULL && rc == WC_EBUSY);
-    ASSERT(wc_scan(w, "hello", 5) == WC_EBUSY);
+    ASSERT(b != NULL && rc == WC_OK);
+
+    ASSERT(stream_scan_all(a, "al", 2) == WC_OK);
+    ASSERT(stream_scan_all(b, "be", 2) == WC_OK);
+    ASSERT(stream_scan_all(a, "pha ", 4) == WC_OK);
+    ASSERT(stream_scan_all(b, "ta ", 3) == WC_OK);
+    ASSERT(wc_stream_finish(a) == WC_OK);
+    ASSERT(wc_stream_finish(b) == WC_OK);
+    ASSERT(wc_total(w) == 2);
+    ASSERT(wc_unique(w) == 2);
 
     wc_stream_close(a);
-    b = wc_stream_open(w, &rc);
-    ASSERT(b != NULL && rc == WC_OK);
     wc_stream_close(b);
     wc_close(w);
-#else
-    TEST("stream reuse enforces single active stream (skip)");
-#endif
+
     PASS();
     return 0;
 }
@@ -971,7 +963,7 @@ static int test_stream_finish_state_machine(void)
 
     consumed = 5;
     if (wc_stream_scan_ex(s, "alpha", 5, &consumed) != frc || consumed != 0) {
-        FAIL("wc_stream_scan after finish returns finish rc and zeroes "
+        FAIL("wc_stream_scan_ex after finish returns finish rc and zeroes "
              "consumed_out");
         ok = 0;
         goto done;
@@ -989,7 +981,7 @@ done:
 
 static int test_stream_parent_close_detaches_stream(void)
 {
-#if WC_BOOL(WC_NO_HEAP)
+#if (WC_NO_HEAP + 0)
     TEST("stream: parent close detaches stream");
     PASS();
     return 0;
@@ -1127,221 +1119,28 @@ static int test_limits_budget_enforced(void)
     return 0;
 }
 
-static int test_stream_open_inplace_size_and_alignment(void)
+static int test_explicit_sizing_not_shrunk_by_budget(void)
 {
-    wc *w;
-    size_t need = 0;
+    wc_limits lim;
     int rc = WC_OK;
 
-    TEST("stream_open_inplace: size + alignment + stream_size");
+    TEST("limits: explicit init_cap/block_size are not shrunk");
 
-    w = wc_open(0);
-    ASSERT(w != NULL);
+    wc_limits_init(&lim);
+    lim.init_cap = 4096;
+    lim.max_bytes = 4096;
+    ASSERT(wc_open_ex(0, &lim, &rc) == NULL);
+    ASSERT(rc == WC_EBADLIMITS);
 
-    need = wc_stream_size(w);
-    ASSERT(need > 0);
-
-    {
-        WC_TEST_STATIC_BUF(mem, 8192);
-        wc_stream *s = NULL;
-
-        ASSERT(need <= sizeof mem.buf);
-
-        rc = WC_OK;
-        s = wc_stream_open_inplace(w, mem.buf, need - 1, &rc);
-        ASSERT(s == NULL);
-#if WC_BOOL(WC_HAVE_UINTPTR)
-        ASSERT(rc == WC_NOMEM);
-#else
-        ASSERT(rc == WC_EBADLIMITS);
-#endif
-
-        rc = WC_OK;
-        s = wc_stream_open_inplace(w, mem.buf, need, &rc);
-#if WC_BOOL(WC_HAVE_UINTPTR)
-        ASSERT(s != NULL);
-        ASSERT(rc == WC_OK);
-
-        wc_stream_close(s); /* owns_self==0 => no free */
-#else
-        ASSERT(s == NULL);
-        ASSERT(rc == WC_EBADLIMITS);
-#endif
-    }
-
-#if WC_BOOL(WC_HAVE_UINTPTR)
-    {
-        WC_TEST_STATIC_BUF(mem, 8192);
-        wc_stream *s = NULL;
-
-        rc = WC_OK;
-        s = wc_stream_open_inplace(w, (void *)(mem.buf + 1), need, &rc);
-        ASSERT(s == NULL);
-        ASSERT(rc == WC_EALIGN);
-    }
-
-    {
-        wc_stream *s = NULL;
-
-        rc = WC_OK;
-        s = wc_stream_open_inplace(w, (void *)w, need, &rc);
-        ASSERT(s == NULL);
-        ASSERT(rc == WC_EBADLIMITS);
-    }
-#endif
-
-    wc_close(w);
-    PASS();
-    return 0;
-}
-
-static int test_stream_open_inplace_rejects_overlaps(void)
-{
-    TEST("stream_open_inplace: rejects internal and active-stream overlap");
-
-#if !WC_BOOL(WC_HAVE_UINTPTR)
-    PASS();
-    return 0;
-#else
-    {
-        wc_limits lim;
-        WC_TEST_STATIC_BUF(pool, 65536);
-        wc *w;
-        size_t need;
-        int rc = WC_OK;
-        wc_stream *s;
-
-        wc_limits_init(&lim);
-        lim.static_buf = pool.buf;
-        lim.static_size = sizeof pool.buf;
-
-        w = wc_open_ex(32, &lim, &rc);
-        ASSERT(w != NULL);
-        ASSERT(rc == WC_OK);
-        ASSERT(wc_add(w, "alpha") == WC_OK);
-
-        need = wc_stream_size(w);
-        ASSERT(need > 0 && need <= sizeof pool.buf);
-
-        rc = WC_OK;
-        s = wc_stream_open_inplace(w, pool.buf, need, &rc);
-        ASSERT(s == NULL);
-        ASSERT(rc == WC_EBADLIMITS);
-
-        wc_close(w);
-    }
-
-    {
-        WC_TEST_STATIC_BUF(mem, 8192);
-        wc *w;
-        wc_stream *s;
-        wc_stream *bad;
-        size_t need;
-        int rc = WC_OK;
-
-#if WC_BOOL(WC_NO_HEAP)
-        wc_limits lim = WC_LIMITS_INIT();
-        WC_TEST_STATIC_BUF(pool, 65536);
-        lim.static_buf = pool.buf;
-        lim.static_size = sizeof pool.buf;
-        w = wc_open_ex(32, &lim, &rc);
-#else
-        w = wc_open(32);
-#endif
-        ASSERT(w != NULL);
-        ASSERT(rc == WC_OK);
-        need = wc_stream_size(w);
-        ASSERT(need > 0 && need <= sizeof mem.buf);
-
-        s = wc_stream_open_inplace(w, mem.buf, need, &rc);
-        ASSERT(s != NULL);
-        ASSERT(rc == WC_OK);
-
-        rc = WC_OK;
-        bad = wc_stream_open_inplace(w, mem.buf, need, &rc);
-        ASSERT(bad == NULL);
-        ASSERT(rc == WC_EBADLIMITS);
-
-        wc_stream_close(s);
-        wc_close(w);
-    }
-
-#if !WC_BOOL(WC_NO_HEAP)
-    {
-        wc *w = wc_open(32);
-        wc_stream *s;
-        wc_stream *bad;
-        size_t need;
-        int rc = WC_OK;
-
-        ASSERT(w != NULL);
-        need = wc_stream_size(w);
-        ASSERT(need > 0);
-
-        s = wc_stream_open(w, &rc);
-        ASSERT(s != NULL);
-        ASSERT(rc == WC_OK);
-
-        rc = WC_OK;
-        bad = wc_stream_open_inplace(w, (void *)s, need, &rc);
-        ASSERT(bad == NULL);
-        ASSERT(rc == WC_EBADLIMITS);
-
-        wc_stream_close(s);
-        wc_close(w);
-    }
-#endif
+    wc_limits_init(&lim);
+    lim.block_size = 8192;
+    lim.max_bytes = 4096;
+    rc = WC_OK;
+    ASSERT(wc_open_ex(8, &lim, &rc) == NULL);
+    ASSERT(rc == WC_EBADLIMITS);
 
     PASS();
     return 0;
-#endif
-}
-
-static int test_stream_parent_close_detaches_inplace_stream(void)
-{
-    TEST("stream: parent close detaches inplace stream");
-
-#if !WC_BOOL(WC_HAVE_UINTPTR)
-    PASS();
-    return 0;
-#else
-    WC_TEST_STATIC_BUF(mem, 8192);
-    size_t consumed = 123;
-    wc_stream *s;
-    wc *w;
-    size_t need;
-    int rc = WC_OK;
-
-#if WC_BOOL(WC_NO_HEAP)
-    wc_limits lim = WC_LIMITS_INIT();
-    WC_TEST_STATIC_BUF(pool, 65536);
-    lim.static_buf = pool.buf;
-    lim.static_size = sizeof pool.buf;
-    w = wc_open_ex(32, &lim, &rc);
-#else
-    w = wc_open(32);
-#endif
-    ASSERT(w != NULL);
-    ASSERT(rc == WC_OK);
-
-    need = wc_stream_size(w);
-    ASSERT(need > 0 && need <= sizeof mem.buf);
-
-    s = wc_stream_open_inplace(w, mem.buf, need, &rc);
-    ASSERT(s != NULL);
-    ASSERT(rc == WC_OK);
-    ASSERT(wc_stream_scan(s, "alpha", 5) == WC_OK);
-
-    wc_close(w);
-
-    ASSERT(wc_stream_scan_ex(s, "beta", 4, &consumed) == WC_ERROR);
-    ASSERT(consumed == 0);
-    ASSERT(wc_stream_finish(s) == WC_ERROR);
-    wc_stream_close(s);
-
-    PASS();
-    return 0;
-#endif
 }
 
 /* Monotonic boundary test for static_size */
@@ -1480,7 +1279,6 @@ static int test_strict_max_bytes_blocks_peaks(void)
 {
     wc_limits base = WC_LIMITS_INIT();
     wc_limits lim;
-    const wc_build_config *info = wc_build_info();
     wc_stats st;
     wc *probe;
     wc *loose;
@@ -1493,12 +1291,13 @@ static int test_strict_max_bytes_blocks_peaks(void)
 
     TEST("strict_max_bytes rejects transient peaks");
 
+    ASSERT(infer_slot_size(&table_bytes));
     base.init_cap = 4;
 
     probe = wc_open_ex(0, &base, &rc);
     ASSERT(probe != NULL && rc == WC_OK);
     ASSERT(wc_get_stats(probe, &st) == WC_OK);
-    table_bytes = st.cap * info->sizeof_slot;
+    table_bytes *= st.cap;
     ASSERT(st.bytes_used >= table_bytes);
     other_bytes = st.bytes_used - table_bytes;
     new_table_bytes = table_bytes * 2u;
@@ -1522,7 +1321,7 @@ static int test_strict_max_bytes_blocks_peaks(void)
     ASSERT(strict != NULL && rc == WC_OK);
     ASSERT(wc_get_stats(strict, &st) == WC_OK);
     {
-        size_t cur_table = st.cap * info->sizeof_slot;
+        size_t cur_table = table_bytes;
         size_t grow_need = st.bytes_used + cur_table * 2u;
         const int expect_fail =
                 st.bytes_limit && grow_need > st.bytes_limit ? 1 : 0;
@@ -1664,49 +1463,6 @@ static int test_add_n_embedded_nul_truncates(void)
     ASSERT(r[0].count == 1);
 
     wc_results_free(r);
-    wc_close(w);
-    PASS();
-    return 0;
-}
-
-static int test_max_probe_duplicates_still_increment(void)
-{
-    wc_limits lim = WC_LIMITS_INIT();
-    wc *w;
-    wc_stats st;
-#if !WC_BOOL(WC_TEST_FORCE_HASH)
-    int rc;
-#endif
-
-    TEST("max_probe: duplicates increment even when cap hit");
-
-    lim.init_cap = 8;
-    lim.max_probe = 1;
-    w = wc_open_ex(0, &lim, NULL);
-    ASSERT(w != NULL);
-    ASSERT(wc_get_stats(w, &st) == WC_OK);
-
-    /* Force clustering by using words that land near each other. */
-    ASSERT(wc_add(w, "aa") == WC_OK);
-#if WC_BOOL(WC_TEST_FORCE_HASH)
-    ASSERT(wc_add(w, "bb") == WC_NOMEM);
-#else
-    ASSERT(wc_add(w, "bb") == WC_OK);
-    ASSERT(wc_add(w, "cc") == WC_OK);
-
-    /* With max_probe=1, this new unique may fail after one grow attempt. */
-    rc = wc_add(w, "dd");
-    ASSERT(rc == WC_OK || rc == WC_NOMEM);
-#endif
-
-    {
-        size_t u0 = wc_unique(w);
-        size_t t0 = wc_total(w);
-        ASSERT(wc_add(w, "aa") == WC_OK);
-        ASSERT(wc_unique(w) == u0);
-        ASSERT(wc_total(w) == t0 + 1);
-    }
-
     wc_close(w);
     PASS();
     return 0;
@@ -1922,7 +1678,7 @@ static int test_validate_gate(void)
 
     TEST("validate guards invalid handles");
 
-    raw = calloc(1, wc_handle_size());
+    raw = calloc(1, 4096);
     if (!raw) {
         FAIL("raw != NULL");
         ok = 0;
@@ -2008,30 +1764,11 @@ static int test_build_info(void)
     ASSERT((cfg->use_libc_string != 0) == (WC_USE_LIBC_STRING != 0));
     ASSERT((cfg->use_libc_qsort != 0) == (WC_USE_LIBC_QSORT != 0));
     ASSERT((cfg->have_errno != 0) == (WC_HAVE_ERRNO != 0));
-    ASSERT((cfg->ascii_only != 0) == (WC_ASCII_ONLY != 0));
-    ASSERT((cfg->stream_reuse_scanbuf != 0) == (WC_STREAM_REUSE_SCANBUF != 0));
     ASSERT((cfg->no_heap != 0) == (WC_NO_HEAP != 0));
     ASSERT((cfg->hash_strong != 0) == (WC_HASH_STRONG != 0));
     ASSERT((cfg->have_uintptr != 0) == (WC_HAVE_UINTPTR != 0));
     ASSERT((cfg->trust_static_buffer_alignment != 0) ==
            (WC_TRUST_STATIC_BUFFER_ALIGNMENT != 0));
-    ASSERT(cfg->sizeof_wc_limits == sizeof(wc_limits));
-    ASSERT(cfg->sizeof_wc > 0);
-    ASSERT(cfg->sizeof_slot > 0);
-    PASS();
-    return 0;
-}
-
-static int test_handle_size_matches_build_info(void)
-{
-    const wc_build_config *cfg;
-
-    TEST("handle_size matches build_info");
-
-    cfg = wc_build_info();
-    ASSERT(cfg != NULL);
-    ASSERT(wc_handle_size() == cfg->sizeof_wc);
-
     PASS();
     return 0;
 }
@@ -2128,17 +1865,22 @@ static int test_reserve_static_respects_max_bytes(void)
     ASSERT(wc_get_stats(w, &st) == WC_OK);
     ASSERT(st.static_mode == 1);
     ASSERT(st.bytes_limit == 2048);
+    ASSERT(st.bytes_used <= st.bytes_limit);
 
-    /* expected_bytes that fits physical buf but exceeds bytes_limit. */
-    {
-        const size_t rem_limit = st.bytes_limit - st.bytes_used;
-        const size_t rem_buf = sizeof pool.buf - st.bytes_used;
-
-        ASSERT(rem_buf > rem_limit); /* otherwise cannot distinguish */
-        ASSERT(wc_reserve(w, 0, rem_limit + 1) == WC_NOMEM);
-    }
+    ASSERT(wc_reserve(w, 0, sizeof pool.buf) == WC_NOMEM);
 
     wc_close(w);
+
+    wc_limits_init(&lim);
+    lim.static_buf = pool.buf;
+    lim.static_size = sizeof pool.buf;
+    lim.max_bytes = 2048; /* smaller than static_size */
+    lim.block_size = 4096;
+
+    w = wc_open_ex(0, &lim, &rc);
+    ASSERT(w == NULL);
+    ASSERT(rc == WC_EBADLIMITS);
+
     PASS();
     return 0;
 }
@@ -2258,7 +2000,6 @@ static int test_grow_tight_budget_allows_postgrow_fit(void)
 {
     wc_limits lim;
     wc_stats st;
-    const wc_build_config *cfg = wc_build_info();
     size_t slot_sz;
     size_t old_alloc, post_other, new_alloc, tight_budget;
     size_t block_overhead;
@@ -2270,9 +2011,7 @@ static int test_grow_tight_budget_allows_postgrow_fit(void)
 
     TEST("grow: post-grow fits but peak doesn't (manual alloc path)");
 
-    ASSERT(cfg != NULL);
-    slot_sz = cfg->sizeof_slot;
-    ASSERT(slot_sz > 0);
+    ASSERT(infer_slot_size(&slot_sz));
 
     /* First open (no budget) to measure post_other precisely. */
     wc_limits_init(&lim);
@@ -2305,25 +2044,9 @@ static int test_grow_tight_budget_allows_postgrow_fit(void)
     ASSERT(threshold < SIZE_MAX);
     ASSERT(threshold + 1u <= SIZE_MAX / WC_TEST_ALIGN);
     arena_need = (threshold + 1u) * WC_TEST_ALIGN;
-    if (arena_need < WC_MIN_BLOCK_SZ)
-        arena_need = WC_MIN_BLOCK_SZ;
+    ASSERT(arena_need <= lim.block_size);
 
-    tight_budget = block_overhead + WC_MIN_BLOCK_SZ + new_alloc;
-    {
-        const size_t min_block_guard = (size_t)WC_MIN_BLOCK_SZ * 8u;
-        if (tight_budget > min_block_guard) {
-            size_t num = block_overhead + new_alloc;
-            ASSERT(num < (SIZE_MAX / 8u));
-            /* Solve: budget = block_overhead + budget/8 + new_alloc. */
-            tight_budget = (num * 8u + 6u) / 7u; /* ceil(8/7 * num) */
-        }
-    }
-    if (arena_need > WC_MIN_BLOCK_SZ) {
-        ASSERT(arena_need <= SIZE_MAX / 8u);
-        size_t guard = arena_need * 8u; /* ensure block_sz >= arena_need */
-        if (guard > tight_budget)
-            tight_budget = guard;
-    }
+    tight_budget = block_overhead + lim.block_size + new_alloc;
 
     wc_close(w);
 
@@ -2559,7 +2282,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                     n = size - i;
                 memcpy(word, &data[i], n);
                 word[n] = '\0';
-                (void)wc_add(w, word);
+                {
+                    int rc = wc_add(w, word);
+                    if (rc != WC_OK && rc != WC_NOMEM)
+                        abort();
+                }
                 i += n;
                 break;
             }
@@ -2570,7 +2297,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 n = (size_t)data[i++];
                 if (size - i < n)
                     n = size - i;
-                (void)wc_scan(w, (const char *)&data[i], n);
+                {
+                    int rc = wc_scan(w, (const char *)&data[i], n);
+                    if (rc != WC_OK && rc != WC_NOMEM)
+                        abort();
+                }
                 i += n;
                 break;
             }
@@ -2635,8 +2366,8 @@ int main(void)
     test_open_ex_tiny_budget_fail();
     test_open_ex_tiny_budget_fail_reason();
     test_limits_budget_enforced();
+    test_explicit_sizing_not_shrunk_by_budget();
     test_limits_invalid_combinations();
-    test_handle_buf_static_buf_alias_rules();
     test_open_ex_tiny_static_fail();
     test_static_buf_misaligned_rejected();
     test_open_ex_misaligned_rejected_reason();
@@ -2647,11 +2378,12 @@ int main(void)
     test_static_with_tiny_max_bytes_fails();
     test_max_word_clamped_to_wc_max_word();
     test_static_accepts_one_max_word();
+    test_static_default_arena_uses_remaining_budget();
+    test_static_explicit_block_size_is_honored();
     test_grow_preserves_existing_keys();
     test_duplicates_survive_exhaustion_static();
     test_duplicates_survive_exhaustion_max_bytes();
     test_strict_max_bytes_blocks_peaks();
-    test_max_probe_duplicates_still_increment();
     test_arena_grows_blocks_dynamic();
     test_reserve_static_respects_max_bytes();
     test_reserve_static_checks_arena_capacity();
@@ -2659,8 +2391,6 @@ int main(void)
     test_grow_tight_budget_allows_postgrow_fit();
     test_scan_len_gt_ptrdiff_max_rejected();
     test_stream_len_gt_ptrdiff_max_rejected();
-    test_stream_open_inplace_size_and_alignment();
-    test_stream_open_inplace_rejects_overlaps();
 
     printf("\nwc_add:\n");
     test_add_single();
@@ -2691,7 +2421,6 @@ int main(void)
     test_version();
     test_errstr();
     test_build_info();
-    test_handle_size_matches_build_info();
     test_stats_and_reserve();
 
     printf("\nCursor / Invariants:\n");
@@ -2700,10 +2429,9 @@ int main(void)
     printf("\nStreaming:\n");
     test_stream_matches_wc_scan_various_chunks();
     test_stream_nomem_allows_continue();
-    test_stream_reuse_blocks_double_open();
+    test_stream_allows_multiple_active_streams();
     test_stream_finish_state_machine();
     test_stream_parent_close_detaches_stream();
-    test_stream_parent_close_detaches_inplace_stream();
 
 #if defined(WC_TEST_OOM) && defined(__GLIBC__)
     printf("\nOOM Injection (glibc-specific):\n");

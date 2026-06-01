@@ -18,7 +18,7 @@
 static Slot *find_slot(wc *w, const char *word, size_t len)
 {
     wc_hash_t h = wc_hash_bytes(word, len, w->seed);
-    return tab_find(w, word, len, h, NULL, 0);
+    return tab_find(w, word, len, h);
 }
 
 static int duplicate_insert_rejects_count_wrap(void)

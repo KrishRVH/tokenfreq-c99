@@ -16,10 +16,16 @@ The CLI requires the linked `wordcount` library to be hosted and heap-enabled.
 `--help` and `--version` still work with other linked configurations so build
 mismatches can be diagnosed.
 
+Memory note: ordinary `--top N` output without length filters uses `wc_topn()`
+and allocates only the displayed rows. Non-quiet `--all` and length-filtered
+output need the full sorted result array before filtering; quiet length-filtered
+output counts matches with the zero-allocation cursor.
+
 ## Exit Codes
 
 - `0` success
-- `1` runtime failure (I/O, OOM, parse)
+- `1` runtime failure (I/O, OOM/allocation, invalid `WC_MAX_BYTES`, output
+  errors)
 - `2` usage/argument errors
 
 ## Options
@@ -29,14 +35,14 @@ mismatches can be diagnosed.
     unless `--all` is set, in which case the top limit is ignored).
   - `--all` – show all unique words.
   - `--format {table,tsv,json}` – output format (default: table).
-  - `--summary` – print summary totals (default; retained for explicitness).
   - `-q, --quiet` – suppress per-word listing; summary only.
   - `--color {auto,always,never}` / `--no-color`.
 - Parsing / limits:
   - `--min-len N`, `--max-len N` – filter results by displayed word length.
   - `--max-word N` – set library `max_word` (clamped to build-time `WC_MAX_WORD`).
   - `--max-bytes BYTES` – set the internal memory budget (table/arena/scanbuf).
-  - `--strict-max-bytes` – enforce that budget as a hard peak cap.
+  - `--strict-max-bytes` – enforce that budget as a hard peak cap for tracked
+    internal allocations. Requires a nonzero `--max-bytes` or `WC_MAX_BYTES`.
 - Misc:
   - `--version`
   - `-h, --help`

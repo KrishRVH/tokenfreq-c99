@@ -27,14 +27,15 @@
 ** Environment:
 **   WC_MAX_BYTES  - Optional steady-state allocation budget for internal
 **                   table/arena/scan-buffer storage, in bytes (e.g.
-**                   "8388608" for 8MB). Use --strict-max-bytes for a hard peak
-**                   cap. Must be a non-negative decimal integer.
+**                   "8388608" for 8MB). With a nonzero budget,
+**                   --strict-max-bytes enforces a hard peak cap on those tracked
+**                   internal allocations. Must be a non-negative decimal integer.
 */
 #ifndef WC_NO_HOSTED_MAIN
 
 #include "wordcount.h"
 
-#if WC_BOOL(WC_NO_HEAP) || !WC_BOOL(WC_STDC_HOSTED)
+#if (WC_NO_HEAP + 0) || !(WC_STDC_HOSTED + 0)
 #error "wc_main.c requires a hosted heap-enabled wordcount build; define WC_NO_HOSTED_MAIN to omit the CLI main."
 #endif
 
@@ -46,7 +47,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <locale.h>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -60,6 +60,7 @@
 
 static wchar_t *utf8_to_wide(const char *utf8);
 #else
+#include <signal.h>
 #include <unistd.h>
 #endif
 
@@ -110,7 +111,6 @@ typedef struct {
     size_t max_bytes;
     int has_max_bytes;
     int strict_max_bytes;
-    int summary;
     int quiet;
     output_format format;
     color_mode color;
@@ -247,8 +247,7 @@ static int print_usage(FILE *out)
             "  -n, --top N           Show top N words (default %d)\n"
             "      --all             Show all unique words\n"
             "      --format {table,tsv,json}\n"
-            "      --summary         Print totals (default; explicit no-op)\n"
-            "  -q, --quiet           Summary only (implies --summary)\n"
+            "  -q, --quiet           Summary only\n"
             "      --color {auto,always,never}\n"
             "      --no-color        Disable color entirely\n"
             "\n"
@@ -260,8 +259,8 @@ static int print_usage(FILE *out)
             "Memory:\n"
             "      --max-bytes N     Budget internal bytes (overrides "
             "WC_MAX_BYTES)\n"
-            "      --strict-max-bytes Enforce a hard cap (no transient "
-            "spikes)\n"
+            "      --strict-max-bytes Enforce nonzero --max-bytes/WC_MAX_BYTES "
+            "as peak cap\n"
             "\n"
             "Other:\n"
             "      --version         Print version and exit\n"
@@ -295,7 +294,6 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
     opts->max_bytes = 0;
     opts->has_max_bytes = 0;
     opts->strict_max_bytes = 0;
-    opts->summary = 1;
     opts->quiet = 0;
     opts->format = FORMAT_TABLE;
     opts->color = COLOR_AUTO;
@@ -319,15 +317,12 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
             break;
         } else if (strcmp(arg, "--all") == 0) {
             opts->show_all = 1;
-        } else if (strcmp(arg, "--summary") == 0) {
-            opts->summary = 1;
         } else if (strcmp(arg, "--strict-max-bytes") == 0) {
             opts->strict_max_bytes = 1;
         } else if (strcmp(arg, "--no-color") == 0) {
             opts->color = COLOR_NEVER;
         } else if (strcmp(arg, "--quiet") == 0 || strcmp(arg, "-q") == 0) {
             opts->quiet = 1;
-            opts->summary = 1;
         } else if (strcmp(arg, "--top") == 0 || strcmp(arg, "-n") == 0) {
             size_t v;
             if (i + 1 >= argc)
@@ -633,8 +628,12 @@ done:
     }
     if (st)
         wc_stream_close(st);
-    if (fp)
-        fclose(fp);
+    if (fp && fclose(fp) != 0) {
+        if (rc == 0) {
+            (void)fprintf(stderr, "wc: %s: %s\n", path, strerror(errno));
+            rc = -1;
+        }
+    }
     if (stats) {
         if (rc == 0)
             stats->files_processed++;
@@ -862,6 +861,59 @@ static int print_tsv(const wc_word *words, size_t n)
     return 0;
 }
 
+static int print_json_string(const char *s)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    if (cli_putc(stdout, '"') < 0)
+        return -1;
+    while (*s) {
+        unsigned char c = (unsigned char)*s++;
+        switch (c) {
+            case '"':
+                if (cli_fputs(stdout, "\\\"") < 0)
+                    return -1;
+                break;
+            case '\\':
+                if (cli_fputs(stdout, "\\\\") < 0)
+                    return -1;
+                break;
+            case '\b':
+                if (cli_fputs(stdout, "\\b") < 0)
+                    return -1;
+                break;
+            case '\f':
+                if (cli_fputs(stdout, "\\f") < 0)
+                    return -1;
+                break;
+            case '\n':
+                if (cli_fputs(stdout, "\\n") < 0)
+                    return -1;
+                break;
+            case '\r':
+                if (cli_fputs(stdout, "\\r") < 0)
+                    return -1;
+                break;
+            case '\t':
+                if (cli_fputs(stdout, "\\t") < 0)
+                    return -1;
+                break;
+            default:
+                if (c < 0x20u || c >= 0x80u) {
+                    if (cli_fputs(stdout, "\\u00") < 0 ||
+                        cli_putc(stdout, hex[(c >> 4) & 0x0fu]) < 0 ||
+                        cli_putc(stdout, hex[c & 0x0fu]) < 0) {
+                        return -1;
+                    }
+                } else if (cli_putc(stdout, c) < 0) {
+                    return -1;
+                }
+                break;
+        }
+    }
+    return cli_putc(stdout, '"');
+}
+
 static int
 print_json(const wc_word *words, size_t n, const summary_info *summary)
 {
@@ -869,11 +921,11 @@ print_json(const wc_word *words, size_t n, const summary_info *summary)
         return -1;
     for (size_t i = 0; i < n; i++) {
         if (cli_fprintf(stdout,
-                        "%s{\"rank\":%zu,\"count\":%zu,\"word\":\"%s\"}",
+                        "%s{\"rank\":%zu,\"count\":%zu,\"word\":",
                         (i == 0) ? "" : ",",
                         i + 1u,
-                        words[i].count,
-                        words[i].word) < 0) {
+                        words[i].count) < 0 ||
+            print_json_string(words[i].word) < 0 || cli_putc(stdout, '}') < 0) {
             return -1;
         }
     }
@@ -903,16 +955,40 @@ static int print_summary_text(const summary_info *summary, FILE *out)
                        summary->bytes);
 }
 
+static int word_passes_filters(const char *word, const cli_opts *opts)
+{
+    size_t wl = strlen(word);
+
+    if (opts->has_min_len && wl < opts->min_len)
+        return 0;
+    if (opts->has_max_len && wl > opts->max_len)
+        return 0;
+    return 1;
+}
+
+static size_t count_filtered_cursor(const wc *w, const cli_opts *opts)
+{
+    wc_cursor cursor;
+    size_t kept = 0;
+
+    wc_cursor_init(&cursor, w);
+    for (;;) {
+        const char *word = NULL;
+        if (!wc_cursor_next(&cursor, &word, NULL))
+            break;
+        if (word_passes_filters(word, opts))
+            kept++;
+    }
+    return kept;
+}
+
 static size_t
 filter_results(wc_word *words, size_t len, const cli_opts *opts, size_t *shown)
 {
     size_t kept = 0;
 
     for (size_t i = 0; i < len; i++) {
-        size_t wl = strlen(words[i].word);
-        if (opts->has_min_len && wl < opts->min_len)
-            continue;
-        if (opts->has_max_len && wl > opts->max_len)
+        if (!word_passes_filters(words[i].word, opts))
             continue;
         words[kept++] = words[i];
     }
@@ -958,6 +1034,10 @@ int main(int argc, char **argv)
     size_t display_len = 0;
     summary_info summary = { 0, 0, 0, 0, 0 };
 
+#if !defined(_WIN32) && defined(SIGPIPE)
+    (void)signal(SIGPIPE, SIG_IGN);
+#endif
+
 #ifdef _WIN32
     int argc_win = 0;
     char **argv_win = NULL;
@@ -994,15 +1074,12 @@ int main(int argc, char **argv)
                 out_rc = cli_fprintf(
                         stdout,
                         "features: hosted=%s, libc-string=%s, libc-qsort=%s, "
-                        "errno=%s, ascii-only=%s, stream-reuse=%s, no-heap=%s, "
-                        "hash-strong=%s, uintptr=%s, "
+                        "errno=%s, no-heap=%s, hash-strong=%s, uintptr=%s, "
                         "trust-static-alignment=%s\n",
                         yn(build->hosted),
                         yn(build->use_libc_string),
                         yn(build->use_libc_qsort),
                         yn(build->have_errno),
-                        yn(build->ascii_only),
-                        yn(build->stream_reuse_scanbuf),
                         yn(build->no_heap),
                         yn(build->hash_strong),
                         yn(build->have_uintptr),
@@ -1022,15 +1099,6 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    if (BUILD_CFG_HAS(build, ascii_only)) {
-        if (!build->ascii_only)
-            setlocale(LC_CTYPE, "C");
-    } else {
-#if !WC_BOOL(WC_ASCII_ONLY)
-        setlocale(LC_CTYPE, "C");
-#endif
-    }
-
     if (opts.has_max_bytes) {
         lim.max_bytes = opts.max_bytes;
         have_limits = 1;
@@ -1043,6 +1111,13 @@ int main(int argc, char **argv)
             rc = 1;
             goto cleanup;
         }
+    }
+    if (opts.strict_max_bytes && lim.max_bytes == 0) {
+        (void)fprintf(stderr,
+                      "wc: --strict-max-bytes requires --max-bytes N or "
+                      "WC_MAX_BYTES with N > 0\n");
+        rc = 2;
+        goto cleanup;
     }
     if (opts.strict_max_bytes) {
         lim.strict_max_bytes = 1;
@@ -1079,16 +1154,29 @@ int main(int argc, char **argv)
     summary.unique = wc_unique(w);
     summary.bytes = stats.bytes_processed;
 
-    {
+    if (opts.quiet) {
+        filtered_len = (opts.has_min_len || opts.has_max_len)
+                               ? count_filtered_cursor(w, &opts)
+                               : summary.unique;
+        display_len = 0;
+    } else if (!opts.show_all && !opts.has_min_len && !opts.has_max_len) {
+        int topn_rc = wc_topn(w, opts.topn, &words, &words_len);
+        if (topn_rc != WC_OK) {
+            (void)fprintf(stderr, "wc: %s\n", wc_errstr(topn_rc));
+            err = 1;
+            goto finalize;
+        }
+        filtered_len = summary.unique;
+        display_len = words_len;
+    } else {
         int results_rc = wc_results(w, &words, &words_len);
         if (results_rc != WC_OK) {
             (void)fprintf(stderr, "wc: %s\n", wc_errstr(results_rc));
             err = 1;
             goto finalize;
         }
+        filtered_len = filter_results(words, words_len, &opts, &display_len);
     }
-
-    filtered_len = filter_results(words, words_len, &opts, &display_len);
     summary.filtered = filtered_len;
     summary.displayed = opts.quiet ? 0 : display_len;
 
@@ -1106,15 +1194,13 @@ int main(int argc, char **argv)
             case FORMAT_TABLE:
                 if (emit > 0 && print_table(words, emit, color) < 0)
                     err = 1;
-                if (!err && opts.summary &&
-                    print_summary_text(&summary, stdout) < 0)
+                if (!err && print_summary_text(&summary, stdout) < 0)
                     err = 1;
                 break;
             case FORMAT_TSV:
                 if (emit > 0 && print_tsv(words, emit) < 0)
                     err = 1;
-                if (!err && opts.summary &&
-                    print_summary_text(&summary, stderr) < 0)
+                if (!err && print_summary_text(&summary, stderr) < 0)
                     err = 1;
                 break;
             case FORMAT_JSON: {

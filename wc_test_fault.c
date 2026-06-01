@@ -181,6 +181,13 @@ static int run_fault_results_topn_stream(int max_fail)
     return 0;
 }
 
+static int test_results_free_null_does_not_call_custom_free(void)
+{
+    int before = fault_null_free_count();
+    wc_results_free(NULL);
+    return fault_null_free_count() == before ? 0 : 1;
+}
+
 int main(void)
 {
     const int max_fail = 120; /* keep runtime reasonable under sanitizers */
@@ -188,6 +195,8 @@ int main(void)
     printf("\n=== Wordcount Fault Injection Tests (max_fail=%d) ===\n\n",
            max_fail);
 
+    if (test_results_free_null_does_not_call_custom_free())
+        return 1;
     run_fault_open(max_fail);
     if (run_fault_add(max_fail))
         return 1;

@@ -14,7 +14,7 @@
         }                                              \
     } while (0)
 
-#if !WC_BOOL(WC_NO_HEAP)
+#if !((WC_NO_HEAP) != 0)
 int main(void)
 {
     (void)fprintf(stderr,
@@ -39,6 +39,25 @@ static int test_tiny_static_fails(void)
     return 0;
 }
 
+#if !((WC_HAVE_UINTPTR) != 0) && !((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
+static int test_static_requires_trust_without_uintptr(void)
+{
+    wc_limits lim = WC_LIMITS_INIT();
+    int rc = WC_OK;
+    WC_STATIC_BUFFER(pool, 65536);
+    wc *w;
+
+    lim.static_buf = pool.buf;
+    lim.static_size = sizeof pool.buf;
+
+    w = wc_open_ex(32, &lim, &rc);
+    CHECK(w == NULL);
+    CHECK(rc == WC_EBADLIMITS);
+    return 0;
+}
+#endif
+
+#if ((WC_HAVE_UINTPTR) != 0) || ((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
 static int test_omitted_handle_uses_static_buffer(void)
 {
     wc_limits lim = WC_LIMITS_INIT();
@@ -160,14 +179,12 @@ static int test_cursor_enumerates_without_heap_results(void)
     return 0;
 }
 
-static int test_inplace_stream_counts_without_heap(void)
+static int test_stream_open_unavailable_without_heap(void)
 {
     wc_limits lim = WC_LIMITS_INIT();
     int rc = WC_ERROR;
-    size_t need;
     wc_stream *s;
     WC_STATIC_BUFFER(pool, 65536);
-    WC_STATIC_BUFFER(stream_storage, 4096);
     wc *w;
 
     lim.static_buf = pool.buf;
@@ -177,50 +194,28 @@ static int test_inplace_stream_counts_without_heap(void)
     CHECK(w != NULL);
     CHECK(rc == WC_OK);
 
-    need = wc_stream_size(w);
-    CHECK(need > 0);
-    CHECK(need <= sizeof stream_storage.buf);
-
-#if !WC_BOOL(WC_HAVE_UINTPTR)
-    s = wc_stream_open_inplace(w, stream_storage.buf, need - 1u, &rc);
+    s = wc_stream_open(w, &rc);
     CHECK(s == NULL);
-    CHECK(rc == WC_EBADLIMITS);
-    s = wc_stream_open_inplace(
-            w, stream_storage.buf, sizeof stream_storage.buf, &rc);
-    CHECK(s == NULL);
-    CHECK(rc == WC_EBADLIMITS);
-    s = wc_stream_open_inplace(w, (void *)w, need, &rc);
-    CHECK(s == NULL);
-    CHECK(rc == WC_EBADLIMITS);
-
+    CHECK(rc == WC_NOMEM);
     wc_close(w);
     return 0;
-#else
-    s = wc_stream_open_inplace(
-            w, stream_storage.buf, sizeof stream_storage.buf, &rc);
-    CHECK(s != NULL);
-    CHECK(rc == WC_OK);
-    CHECK(wc_stream_scan(s, "Alpha ", 6) == WC_OK);
-    CHECK(wc_stream_scan(s, "beta alpha", 10) == WC_OK);
-    CHECK(wc_stream_finish(s) == WC_OK);
-    wc_stream_close(s);
-
-    CHECK(wc_total(w) == 3);
-    CHECK(wc_unique(w) == 2);
-
-    wc_close(w);
-    return 0;
-#endif
 }
+#endif
 
 int main(void)
 {
+#if !((WC_HAVE_UINTPTR) != 0) && !((WC_TRUST_STATIC_BUFFER_ALIGNMENT) != 0)
+    CHECK(test_tiny_static_fails() == 0);
+    CHECK(test_static_requires_trust_without_uintptr() == 0);
+    return 0;
+#else
     CHECK(test_tiny_static_fails() == 0);
     CHECK(test_omitted_handle_uses_static_buffer() == 0);
     CHECK(test_one_max_word_fits() == 0);
     CHECK(test_result_allocators_validate_args() == 0);
     CHECK(test_cursor_enumerates_without_heap_results() == 0);
-    CHECK(test_inplace_stream_counts_without_heap() == 0);
+    CHECK(test_stream_open_unavailable_without_heap() == 0);
     return 0;
+#endif
 }
 #endif
