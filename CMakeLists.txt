@@ -302,6 +302,34 @@ if(BUILD_TESTING)
   wc_apply_common(wc_test_noheap_nouintptr)
   add_test(NAME wc_test_noheap_nouintptr COMMAND wc_test_noheap_nouintptr)
 
+  add_library(wordcount_lib_noheap_tiny_autotune STATIC wordcount.c)
+  set_target_properties(wordcount_lib_noheap_tiny_autotune PROPERTIES
+    WC_DEF_USE_LIBC_STRING 0
+  )
+  target_compile_definitions(wordcount_lib_noheap_tiny_autotune PUBLIC
+    WC_NO_HEAP=1
+    WC_STDC_HOSTED=0
+    WC_USE_LIBC_QSORT=0
+    WC_HAVE_ERRNO=0
+    WC_MAX_WORD=4
+    WC_MIN_INIT_CAP=1
+    WC_MIN_BLOCK_SZ=1
+    WC_DEFAULT_INIT_CAP=128
+    WC_DEFAULT_BLOCK_SZ=256
+  )
+  wc_apply_common(wordcount_lib_noheap_tiny_autotune)
+
+  add_executable(wc_test_noheap_tiny_autotune
+    tests/noheap_tiny_autotune.c)
+  target_link_libraries(wc_test_noheap_tiny_autotune PRIVATE
+    wordcount_lib_noheap_tiny_autotune)
+  set_target_properties(wc_test_noheap_tiny_autotune PROPERTIES
+    WC_DEF_USE_LIBC_STRING 0
+  )
+  wc_apply_common(wc_test_noheap_tiny_autotune)
+  add_test(NAME wc_test_noheap_tiny_autotune
+    COMMAND wc_test_noheap_tiny_autotune)
+
   add_executable(wc_test_counter_overflow tests/counter_overflow.c)
   set_target_properties(wc_test_counter_overflow PROPERTIES
     WC_DEF_ENABLE_VALIDATE 1
@@ -463,6 +491,16 @@ if(BUILD_TESTING)
                    wc_compile_noheap_libclight_nouintptr)
   if(TARGET wc_compile_cpp)
     add_dependencies(wc_compile_checks wc_compile_cpp)
+  endif()
+
+  if(CMAKE_NM AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    add_test(NAME wc_no_libc_symbols
+      COMMAND ${CMAKE_COMMAND}
+        -DWC_C_COMPILER=${CMAKE_C_COMPILER}
+        -DWC_NM=${CMAKE_NM}
+        -DWC_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -DWC_TMP_DIR=${PROJECT_BINARY_DIR}/no-libc-symbols
+        -P ${PROJECT_SOURCE_DIR}/tests/no_libc_symbols.cmake)
   endif()
 
   if(WC_BUILD_CLI AND UNIX)

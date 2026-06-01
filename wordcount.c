@@ -365,6 +365,42 @@ static int mul_overflows(size_t a, size_t b)
     return b != 0 && a > WC_SIZE_MAX / b;
 }
 
+static size_t wc_pow2_round_up(size_t n)
+{
+    size_t p = 1;
+
+    while (p < n && p <= (WC_SIZE_MAX / 2u))
+        p <<= 1;
+    return p;
+}
+
+static size_t wc_pow2_round_down(size_t n)
+{
+    size_t p = 1;
+
+    while (p <= n / 2u)
+        p <<= 1;
+    return p;
+}
+
+static int wc_min_word_block_size(size_t runtime_max_word, size_t *out)
+{
+    size_t need;
+
+    if (!out)
+        return 0;
+    if (add_overflows(runtime_max_word, 1u))
+        return 0;
+    need = runtime_max_word + 1u;
+    if (add_overflows(need, WC_ALIGN - 1u))
+        return 0;
+    need += WC_ALIGN - 1u;
+    if (need < WC_MIN_BLOCK_SZ)
+        need = WC_MIN_BLOCK_SZ;
+    *out = need;
+    return 1;
+}
+
 #if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) || \
         WC_INTERNAL_BOOL(WC_TRUST_STATIC_BUFFER_ALIGNMENT)
 static int wc_ptr_aligned(const void *p, size_t align)
@@ -811,6 +847,69 @@ static size_t wc_static_max_block_size(size_t static_size,
     }
 
     return lo;
+}
+
+static int wc_static_choose_layout(size_t static_size,
+                                   size_t static_reserve,
+                                   size_t bytes_limit,
+                                   size_t min_block_sz,
+                                   size_t scan_bytes,
+                                   int explicit_init_cap,
+                                   int explicit_block_size,
+                                   size_t *init_cap,
+                                   size_t *block_sz,
+                                   size_t *table_bytes)
+{
+    size_t cap;
+    size_t min_cap;
+
+    if (!init_cap || !block_sz || !table_bytes)
+        return 0;
+
+    cap = *init_cap;
+    min_cap = explicit_init_cap ? cap : wc_pow2_round_up(WC_MIN_INIT_CAP);
+    if (!wc_cap_valid(cap) || !wc_cap_valid(min_cap) || cap < min_cap)
+        return 0;
+
+    for (;;) {
+        size_t candidate_block = *block_sz;
+        size_t candidate_table_bytes;
+
+        if (mul_overflows(cap, sizeof(Slot)))
+            return 0;
+        candidate_table_bytes = cap * sizeof(Slot);
+
+        if (!explicit_block_size) {
+            candidate_block = wc_static_max_block_size(static_size,
+                                                       static_reserve,
+                                                       bytes_limit,
+                                                       candidate_table_bytes,
+                                                       min_block_sz,
+                                                       scan_bytes);
+        }
+
+        if (!add_overflows(sizeof(Block), candidate_block) &&
+            wc_static_layout_fits(static_size,
+                                  static_reserve,
+                                  bytes_limit,
+                                  candidate_table_bytes,
+                                  candidate_block,
+                                  scan_bytes)) {
+            *init_cap = cap;
+            *block_sz = candidate_block;
+            *table_bytes = candidate_table_bytes;
+            return 1;
+        }
+
+        if (explicit_init_cap || cap == min_cap)
+            break;
+
+        cap >>= 1;
+        if (cap < min_cap)
+            cap = min_cap;
+    }
+
+    return 0;
 }
 
 /*
@@ -1421,14 +1520,7 @@ tune_params(const wc_limits *lim, size_t *init_cap, size_t *block_sz)
                 if (max_cap < WC_MIN_INIT_CAP)
                     max_cap = WC_MIN_INIT_CAP;
 
-                /* Round down to power of two. */
-                {
-                    size_t p = 1;
-                    /* Safe, non-wrapping doubling. */
-                    while (p <= max_cap / 2)
-                        p <<= 1;
-                    cap = p;
-                }
+                cap = wc_pow2_round_down(max_cap);
             }
             /*
             ** Use up to one quarter of the arena budget for the
@@ -1450,12 +1542,7 @@ tune_params(const wc_limits *lim, size_t *init_cap, size_t *block_sz)
         cap = WC_MIN_INIT_CAP;
 
     /* Round up to power of two. */
-    {
-        size_t p = 1;
-        while (p < cap && p <= (WC_SIZE_MAX / 2))
-            p <<= 1;
-        cap = p;
-    }
+    cap = wc_pow2_round_up(cap);
 
     if (blk < WC_MIN_BLOCK_SZ)
         blk = WC_MIN_BLOCK_SZ;
@@ -1469,12 +1556,13 @@ tune_params(const wc_limits *lim, size_t *init_cap, size_t *block_sz)
 wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
 {
     wc *w = NULL;
-    wc_limits lim_local = WC_LIMITS_INIT();
+    wc_limits lim_local;
     int have_limits = 0;
     size_t init_cap = 0;
     size_t block_sz = 0;
     size_t table_bytes = 0;
     size_t runtime_max_word = 0;
+    size_t min_block_sz = 0;
     size_t bytes_limit = 0;
     int static_mode = 0;
 #if !WC_INTERNAL_BOOL(WC_STACK_BUFFER)
@@ -1493,6 +1581,8 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
     int owns_self = 1;
 
     int err = WC_OK;
+
+    wc_limits_init(&lim_local);
 
 #if WC_INTERNAL_BOOL(WC_NO_HEAP)
     /* In no-heap builds, limits must be provided and must include static storage. */
@@ -1608,25 +1698,13 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
         runtime_max_word = WC_MAX_WORD;
 
     /* Ensure first arena block can store at least one max_word word (+NUL). */
-    {
-        size_t need;
-        if (add_overflows(runtime_max_word, 1)) {
-            err = WC_EBADLIMITS;
-            WC_SET_ERRNO(EINVAL);
-            goto fail;
-        }
-        need = runtime_max_word + 1;
-        if (add_overflows(need, WC_ALIGN - 1u)) {
-            err = WC_EBADLIMITS;
-            WC_SET_ERRNO(EINVAL);
-            goto fail;
-        }
-        need += WC_ALIGN - 1u;
-        if (block_sz < need)
-            block_sz = need;
-        if (block_sz < WC_MIN_BLOCK_SZ)
-            block_sz = WC_MIN_BLOCK_SZ;
+    if (!wc_min_word_block_size(runtime_max_word, &min_block_sz)) {
+        err = WC_EBADLIMITS;
+        WC_SET_ERRNO(EINVAL);
+        goto fail;
     }
+    if (block_sz < min_block_sz)
+        block_sz = min_block_sz;
 
     /*
     ** Deterministic validation of "impossible budgets":
@@ -1655,23 +1733,23 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
         layout_scan_bytes = scan_bytes;
 #endif
 
-        if (static_mode && lim_block_size == 0) {
-            block_sz = wc_static_max_block_size(lim_static_size,
-                                                static_reserve,
-                                                bytes_limit,
-                                                table_bytes,
-                                                block_sz,
-                                                layout_scan_bytes);
-            if (add_overflows(sizeof(Block), block_sz)) {
+        if (static_mode) {
+            wc_alloc_state scratch;
+            if (!wc_static_choose_layout(lim_static_size,
+                                         static_reserve,
+                                         bytes_limit,
+                                         min_block_sz,
+                                         layout_scan_bytes,
+                                         lim_init_cap != 0,
+                                         lim_block_size != 0,
+                                         &init_cap,
+                                         &block_sz,
+                                         &table_bytes)) {
                 err = WC_EBADLIMITS;
                 WC_SET_ERRNO(EINVAL);
                 goto fail;
             }
             arena_bytes = sizeof(Block) + block_sz;
-        }
-
-        if (static_mode) {
-            wc_alloc_state scratch;
             wc_memset_internal(&scratch, 0, sizeof scratch);
             scratch.bytes_used = static_reserve;
             scratch.bytes_limit = bytes_limit;

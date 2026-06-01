@@ -595,12 +595,14 @@ static inline void wc_limits_init(wc_limits *limits)
 {
     if (!limits)
         return;
-#ifdef __cplusplus
-    *limits = wc_limits();
-#else
-    *limits = (wc_limits){ 0 };
-#endif
     limits->struct_size = sizeof(*limits);
+    limits->max_bytes = 0;
+    limits->strict_max_bytes = 0;
+    limits->init_cap = 0;
+    limits->block_size = 0;
+    limits->static_buf = NULL;
+    limits->static_size = 0;
+    limits->hash_seed = 0ul;
 }
 /*
 ** Result entry returned by wc_results().
