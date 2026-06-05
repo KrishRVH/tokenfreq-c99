@@ -1109,6 +1109,128 @@ static int wc_static_choose_layout(size_t static_size,
     return 0;
 }
 
+static int wc_dynamic_layout_fits(size_t bytes_limit,
+                                  size_t table_bytes,
+                                  size_t block_sz,
+                                  size_t scan_bytes)
+{
+    size_t arena_bytes;
+    size_t need;
+
+    if (!bytes_limit)
+        return 1;
+    if (!wc_add_object_span(sizeof(Block), block_sz, &arena_bytes))
+        return 0;
+
+    need = table_bytes;
+    if (add_overflows(need, arena_bytes))
+        return 0;
+    need += arena_bytes;
+    if (add_overflows(need, scan_bytes))
+        return 0;
+    need += scan_bytes;
+
+    return need <= bytes_limit;
+}
+
+static int wc_dynamic_max_block_size(size_t bytes_limit,
+                                     size_t table_bytes,
+                                     size_t min_block_sz,
+                                     size_t scan_bytes,
+                                     size_t *out)
+{
+    size_t fixed;
+    size_t max_block;
+    const size_t max_object_block = (size_t)WC_PTRDIFF_MAX - sizeof(Block);
+
+    if (!out || !bytes_limit)
+        return 0;
+
+    fixed = table_bytes;
+    if (add_overflows(fixed, sizeof(Block)))
+        return 0;
+    fixed += sizeof(Block);
+    if (add_overflows(fixed, scan_bytes))
+        return 0;
+    fixed += scan_bytes;
+
+    if (fixed > bytes_limit)
+        return 0;
+
+    max_block = bytes_limit - fixed;
+    if (max_block > max_object_block)
+        max_block = max_object_block;
+    if (max_block < min_block_sz)
+        return 0;
+
+    *out = max_block;
+    return 1;
+}
+
+static int wc_dynamic_choose_layout(size_t bytes_limit,
+                                    size_t min_block_sz,
+                                    size_t scan_bytes,
+                                    int explicit_init_cap,
+                                    int explicit_block_size,
+                                    size_t *init_cap,
+                                    size_t *block_sz,
+                                    size_t *table_bytes)
+{
+    size_t cap;
+    size_t min_cap;
+
+    if (!init_cap || !block_sz || !table_bytes)
+        return 0;
+
+    cap = *init_cap;
+    min_cap = explicit_init_cap ? cap : wc_pow2_round_up(WC_MIN_INIT_CAP);
+    if (!wc_cap_valid(cap) || !wc_cap_valid(min_cap) || cap < min_cap)
+        return 0;
+
+    for (;;) {
+        size_t candidate_block = *block_sz;
+        size_t candidate_table_bytes;
+
+        if (!wc_mul_object_span(cap, sizeof(Slot), &candidate_table_bytes))
+            return 0;
+
+        if (!explicit_block_size) {
+            size_t max_block;
+            if (wc_dynamic_max_block_size(bytes_limit,
+                                          candidate_table_bytes,
+                                          min_block_sz,
+                                          scan_bytes,
+                                          &max_block) &&
+                candidate_block > max_block) {
+                candidate_block = max_block;
+            }
+        }
+
+        if (candidate_block < min_block_sz)
+            candidate_block = min_block_sz;
+
+        if (wc_object_span_valid(candidate_block) &&
+            wc_dynamic_layout_fits(bytes_limit,
+                                   candidate_table_bytes,
+                                   candidate_block,
+                                   scan_bytes)) {
+            *init_cap = cap;
+            *block_sz = candidate_block;
+            *table_bytes = candidate_table_bytes;
+            return 1;
+        }
+
+        if (explicit_init_cap || cap == min_cap)
+            break;
+
+        cap >>= 1;
+        if (cap < min_cap)
+            cap = min_cap;
+    }
+
+    return 0;
+}
+
 /*
 ** Convenience wrapper for the wc object.
 */
@@ -2026,8 +2148,27 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
                 goto fail;
             }
         } else if (bytes_limit) {
-            size_t need = table_bytes;
+            size_t need;
 
+            if (!wc_dynamic_choose_layout(bytes_limit,
+                                          min_block_sz,
+                                          layout_scan_bytes,
+                                          lim_init_cap != 0,
+                                          lim_block_size != 0,
+                                          &init_cap,
+                                          &block_sz,
+                                          &table_bytes)) {
+                err = WC_EBADLIMITS;
+                WC_SET_ERRNO(EINVAL);
+                goto fail;
+            }
+            if (!wc_add_object_span(sizeof(Block), block_sz, &arena_bytes)) {
+                err = WC_EBADLIMITS;
+                WC_SET_ERRNO(EINVAL);
+                goto fail;
+            }
+
+            need = table_bytes;
             if (add_overflows(need, arena_bytes))
                 goto badlimits;
             need += arena_bytes;

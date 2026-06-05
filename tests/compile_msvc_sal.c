@@ -3,6 +3,11 @@
 ** prefix-only stand-in. This catches declarations that incorrectly place WC_WUR
 ** after a function declarator.
 */
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
 #undef WC_STDC_HOSTED
 #define WC_STDC_HOSTED 0
 #undef WC_NO_HEAP

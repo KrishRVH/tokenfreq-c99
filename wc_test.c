@@ -428,6 +428,48 @@ static int test_static_accepts_one_max_word(void)
     return 0;
 }
 
+static int test_dynamic_tight_budget_accepts_one_max_word(void)
+{
+    wc_limits lim = WC_LIMITS_INIT();
+    wc_stats st;
+    wc *probe;
+    wc *w;
+    size_t budget;
+    char word[WC_MAX_WORD + 1u];
+    int rc = WC_OK;
+
+    TEST("max_bytes: first block stores one max_word word");
+
+    for (size_t i = 0; i < WC_MAX_WORD; i++)
+        word[i] = 'a';
+    word[WC_MAX_WORD] = '\0';
+
+    lim.init_cap = WC_MIN_INIT_CAP;
+    lim.block_size = WC_MAX_WORD + 1u;
+
+    probe = wc_open_ex(WC_MAX_WORD, &lim, &rc);
+    ASSERT(probe != NULL);
+    ASSERT(rc == WC_OK);
+    ASSERT(wc_get_stats(probe, &st) == WC_OK);
+    budget = st.bytes_used;
+    wc_close(probe);
+
+    lim.max_bytes = budget;
+    w = wc_open_ex(WC_MAX_WORD, &lim, &rc);
+    ASSERT(w != NULL);
+    ASSERT(rc == WC_OK);
+    ASSERT(wc_get_stats(w, &st) == WC_OK);
+    ASSERT(st.bytes_limit == budget);
+    ASSERT(st.bytes_used <= budget);
+    ASSERT(wc_add_n(w, word, WC_MAX_WORD) == WC_OK);
+    ASSERT(wc_total(w) == 1);
+    ASSERT(wc_unique(w) == 1);
+
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
 static int test_static_default_arena_uses_remaining_budget(void)
 {
     WC_TEST_STATIC_BUF(pool, 8192);
@@ -1141,6 +1183,92 @@ static int test_explicit_sizing_not_shrunk_by_budget(void)
     ASSERT(wc_open_ex(8, &lim, &rc) == NULL);
     ASSERT(rc == WC_EBADLIMITS);
 
+    PASS();
+    return 0;
+}
+
+static int test_dynamic_autotune_retries_smaller_layout(void)
+{
+    wc_limits lim;
+    wc_stats st;
+    wc *probe;
+    size_t slot_sz;
+    size_t min_cap;
+    size_t min_table;
+    size_t other;
+    size_t candidate;
+    int exercised = 0;
+    int rc = WC_OK;
+
+    TEST("limits: dynamic auto-tune retries smaller layout");
+
+    ASSERT(infer_slot_size(&slot_sz));
+
+    wc_limits_init(&lim);
+    lim.init_cap = WC_MIN_INIT_CAP;
+    lim.block_size = WC_MIN_BLOCK_SZ;
+
+    probe = wc_open_ex(WC_MAX_WORD, &lim, &rc);
+    ASSERT(probe != NULL);
+    ASSERT(rc == WC_OK);
+    ASSERT(wc_get_stats(probe, &st) == WC_OK);
+    min_cap = st.cap;
+    ASSERT(min_cap > 0);
+    ASSERT(slot_sz > 0);
+    ASSERT(min_cap <= SIZE_MAX / slot_sz);
+    min_table = min_cap * slot_sz;
+    ASSERT(st.bytes_used >= min_table);
+    other = st.bytes_used - min_table;
+    wc_close(probe);
+
+    if (min_cap <= SIZE_MAX / 2u)
+        candidate = min_cap * 2u;
+    else
+        candidate = 0;
+
+    while (candidate && candidate <= WC_DEFAULT_INIT_CAP) {
+        size_t budget_unit;
+        size_t budget;
+        size_t candidate_table;
+        size_t smaller_table;
+
+        if (slot_sz > SIZE_MAX / 2u)
+            break;
+        budget_unit = slot_sz * 2u;
+        if (candidate > SIZE_MAX / budget_unit)
+            break;
+        budget = candidate * budget_unit;
+        if (candidate > SIZE_MAX / slot_sz)
+            break;
+        candidate_table = candidate * slot_sz;
+        smaller_table = (candidate / 2u) * slot_sz;
+
+        if (candidate_table <= budget && smaller_table <= budget &&
+            other > budget - candidate_table &&
+            other <= budget - smaller_table) {
+            wc *w;
+
+            wc_limits_init(&lim);
+            lim.max_bytes = budget;
+
+            w = wc_open_ex(WC_MAX_WORD, &lim, &rc);
+            ASSERT(w != NULL);
+            ASSERT(rc == WC_OK);
+            ASSERT(wc_get_stats(w, &st) == WC_OK);
+            ASSERT(st.bytes_limit == budget);
+            ASSERT(st.bytes_used <= budget);
+            ASSERT(st.cap < candidate);
+            wc_close(w);
+            exercised = 1;
+            break;
+        }
+
+        if (candidate > SIZE_MAX / 2u)
+            break;
+        candidate *= 2u;
+    }
+
+    (void)exercised; /* Some tiny configurations have no failing boundary. */
     PASS();
     return 0;
 }
@@ -2417,6 +2545,7 @@ int main(void)
     test_open_ex_tiny_budget_fail_reason();
     test_limits_budget_enforced();
     test_explicit_sizing_not_shrunk_by_budget();
+    test_dynamic_autotune_retries_smaller_layout();
     test_limits_invalid_combinations();
     test_open_ex_tiny_static_fail();
     test_static_buf_misaligned_rejected();
@@ -2428,6 +2557,7 @@ int main(void)
     test_static_with_tiny_max_bytes_fails();
     test_max_word_clamped_to_wc_max_word();
     test_static_accepts_one_max_word();
+    test_dynamic_tight_budget_accepts_one_max_word();
     test_static_default_arena_uses_remaining_budget();
     test_static_explicit_block_size_is_honored();
     test_grow_preserves_existing_keys();

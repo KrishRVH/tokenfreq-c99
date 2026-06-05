@@ -596,9 +596,9 @@ typedef struct wc wc;
 **
 ** On small static-buffer systems, set static_buf/static_size and leave
 ** init_cap/block_size at 0 to let the library derive a fitting layout.
-** In dynamic mode, max_bytes is a budget guard; very tight budgets may
-** require explicit init_cap/block_size values because the default tuner is
-** heuristic. On larger systems, you can tune init_cap/block_size directly.
+** In dynamic mode, max_bytes is a budget guard; auto-selected layouts retry
+** smaller table capacities before reporting an impossible budget. On larger
+** systems, you can tune init_cap/block_size directly.
 **
 ** Portable helper to declare a suitably-aligned static buffer for
 ** wc_limits.static_buf in C99.

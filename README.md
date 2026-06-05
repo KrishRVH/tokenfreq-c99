@@ -263,9 +263,9 @@ buffer) are accounted in `bytes_used`, up to `bytes_limit`:
     allocations. With `strict_max_bytes == 0`, table growth may transiently
     exceed this budget if the post-grow footprint fits.
   * `wc_open_ex` validates the selected initial table/block layout against the
-    budget. The current dynamic auto-tuner is heuristic and does not backtrack
-    over smaller table capacities; very tight budgets may need explicit
-    `init_cap` / `block_size` values even when a smaller legal layout would fit.
+    budget. When auto-selected sizing is too large, it retries smaller table
+    capacities and shrinks only auto-selected block sizes before reporting
+    `WC_EBADLIMITS`.
 * In **static-buffer mode**:
 
   * All internal allocations are carved out of `[static_buf,
@@ -496,8 +496,8 @@ Per-instance memory and sizing limits:
   * Initial hash table capacity (number of slots).
   * `0` = let the library choose a default.
   * Rounded up to a power of two internally and floored by `WC_MIN_INIT_CAP`.
-  * For tight dynamic `max_bytes` budgets, setting this explicitly can avoid an
-    auto-selected table that is larger than the budget can support.
+  * Explicit values are not shrunk to satisfy `max_bytes`; impossible explicit
+    layouts fail with `WC_EBADLIMITS`.
 * `block_size`:
 
   * Arena block size in bytes for the first block.
@@ -505,8 +505,8 @@ Per-instance memory and sizing limits:
     default is expanded to use the remaining effective static budget.
   * In static-buffer mode, an explicit value is the capacity of the single word
     arena block; unused static storage is not turned into additional blocks.
-  * For tight dynamic `max_bytes` budgets, setting this explicitly can keep the
-    first arena block within the chosen budget.
+  * Explicit values are not shrunk to satisfy `max_bytes`; impossible explicit
+    layouts fail with `WC_EBADLIMITS`.
 * `static_buf`, `static_size`:
 
   * Optional caller-supplied region used for all **internal** allocations.
