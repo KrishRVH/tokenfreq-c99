@@ -48,6 +48,7 @@ For a concise reference, see:
    - [Runtime Limits via `wc_limits`](#runtime-limits-via-wc_limits)
 7. [Building and Integration](#building-and-integration)
    - [Using CMake (Presets, Recommended)](#using-cmake-presets-recommended)
+   - [Installing with CMake](#installing-with-cmake)
    - [One-shot Build & Quality Script](#one-shot-build--quality-script)
    - [Direct Compilation](#direct-compilation)
    - [Directory Layout](#directory-layout)
@@ -261,6 +262,10 @@ buffer) are accounted in `bytes_used`, up to `bytes_limit`:
   * `bytes_limit` (from `wc_limits.max_bytes`) budgets steady-state internal
     allocations. With `strict_max_bytes == 0`, table growth may transiently
     exceed this budget if the post-grow footprint fits.
+  * `wc_open_ex` validates the selected initial table/block layout against the
+    budget. The current dynamic auto-tuner is heuristic and does not backtrack
+    over smaller table capacities; very tight budgets may need explicit
+    `init_cap` / `block_size` values even when a smaller legal layout would fit.
 * In **static-buffer mode**:
 
   * All internal allocations are carved out of `[static_buf,
@@ -491,6 +496,8 @@ Per-instance memory and sizing limits:
   * Initial hash table capacity (number of slots).
   * `0` = let the library choose a default.
   * Rounded up to a power of two internally and floored by `WC_MIN_INIT_CAP`.
+  * For tight dynamic `max_bytes` budgets, setting this explicitly can avoid an
+    auto-selected table that is larger than the budget can support.
 * `block_size`:
 
   * Arena block size in bytes for the first block.
@@ -498,6 +505,8 @@ Per-instance memory and sizing limits:
     default is expanded to use the remaining effective static budget.
   * In static-buffer mode, an explicit value is the capacity of the single word
     arena block; unused static storage is not turned into additional blocks.
+  * For tight dynamic `max_bytes` budgets, setting this explicitly can keep the
+    first arena block within the chosen budget.
 * `static_buf`, `static_size`:
 
   * Optional caller-supplied region used for all **internal** allocations.
@@ -858,11 +867,45 @@ GCC/Clang builds (not MinGW/MSVC/CompCert).
 
 Notable CMake options:
 
+* `ENABLE_SANITIZERS` – enable AddressSanitizer/UBSan on supported native
+  GCC/Clang executable and shared/module targets.
+* `WC_WERROR` – treat supported compiler warnings as errors.
+* `WC_BUILD_CLI` – build the `wc` command-line tool (default on).
+* `WC_BUILD_SHARED` / `BUILD_SHARED_LIBS` – build shared libraries in addition
+  to static libraries.
+* `WC_INSTALL` – install the library, header, CMake package config, export set,
+  and license.
+* `WC_INSTALL_PKGCONFIG` – install `wordcount.pc` when `WC_INSTALL=ON`
+  (default on).
 * `WC_ENABLE_VALIDATE` – enable `wc_validate` invariant walk (debug/fuzz builds).
 * `WC_HASH_STRONG` – build with SipHash-2-4 instead of FNV-1a.
+* `WC_USE_LIBC_STRING` – use libc string/memory functions (default on).
 * `WC_BUILD_VARIANTS` – build heap/tiny library variants (same symbols; off by
   default for installs, enabled automatically when `BUILD_TESTING` is on).
   Install targets include only built variants.
+
+### Installing with CMake
+
+Install packaging is opt-in:
+
+```bash
+cmake -S . -B build/install -DWC_INSTALL=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build/install
+cmake --install build/install --prefix /tmp/wordcount
+```
+
+Installed files include:
+
+* `include/wordcount/wordcount.h`
+* static library target `wordcount::wordcount`
+* optional shared target `wordcount::wordcount_shared` when shared libraries
+  are enabled
+* optional `wordcount::wordcount_heap` / `wordcount::wordcount_tiny` targets
+  when variants are built
+* CMake package files under `${CMAKE_INSTALL_LIBDIR}/cmake/wordcount`
+* `wordcount.pc` under `${CMAKE_INSTALL_LIBDIR}/pkgconfig` when
+  `WC_INSTALL_PKGCONFIG=ON`
+* license text under `${CMAKE_INSTALL_DATAROOTDIR}/licenses/wordcount`
 
 ### Build Profiles
 
@@ -944,12 +987,31 @@ GitHub Actions currently runs Linux preset builds for `clang`,
 `clang-stronghash`, and `gcc`, plus a clang fuzz smoke test. It also runs the
 `clang` preset on macOS and a raw Visual Studio Debug CMake build on Windows.
 The CMake test matrix includes default, heap-scan-buffer, tiny, forced-hash,
-no-heap, collision, counter-overflow, and portable fault-injection targets.
+no-heap/static-buffer, pointer-alignment, pointer-span cap, collision,
+counter-overflow, compile-only C/C++ compatibility, invalid configuration,
+CLI output-error, pkg-config relocatability, and portable fault-injection
+targets.
 
 ### Directory Layout
 
 ```text
 .
+├── .github/workflows/ci.yml
+├── benchmark/
+│   └── bench.sh
+├── cmake/
+│   ├── wordcountConfig.cmake.in
+│   └── wordcount.pc.in
+├── docs/
+│   ├── cli.md
+│   ├── guide.md
+│   └── spec.md
+├── tests/
+│   ├── compile_*.c / compile_*.cpp
+│   ├── noheap_static.c
+│   ├── noheap_tiny_autotune.c
+│   ├── ptrdiff_caps.c
+│   └── *.cmake
 ├── CMakeLists.txt
 ├── CMakePresets.json
 ├── c-build.sh
@@ -957,8 +1019,13 @@ no-heap, collision, counter-overflow, and portable fault-injection targets.
 ├── mingw-w64.cmake
 ├── wordcount.h
 ├── wordcount.c
+├── wc_fault_alloc.c
+├── wc_fault_alloc.h
+├── wc_fuzz_diff.c
 ├── wc_main.c
 ├── wc_test.c
+├── wc_test_collision.c
+├── wc_test_fault.c
 ├── LICENSE
 └── README.md
 ```
@@ -1059,6 +1126,13 @@ cmake --preset clang
 cmake --build --preset clang
 ctest --preset clang
 ```
+
+The preset test graph covers the default library, heap-scan-buffer and tiny
+variants, no-heap/static-buffer configurations, pointer-alignment fallbacks,
+forced hash-collision paths, counter overflow, pointer-span caps, portable
+allocation-fault injection, compile-only C/C++ checks, invalid compile-time
+configurations, CLI output errors, and pkg-config relocatability when install
+tests are enabled without sanitizers.
 
 OOM injection (glibc only):
 
