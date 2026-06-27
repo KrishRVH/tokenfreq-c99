@@ -1,0 +1,530 @@
+[settings]
+lockfile = true
+
+[tools]
+gitleaks = "8.30.1"
+syft = "1.45.1"
+
+[tasks.install]
+description = "Install pinned project tools"
+run = "mise install"
+
+[tasks.lock]
+description = "Refresh mise.lock after tool-version changes"
+run = "mise lock"
+
+[tasks.doctor]
+description = "Inspect mise configuration and installed tools"
+run = "mise doctor"
+
+[tasks.tasks]
+description = "List available project tasks"
+run = "mise tasks"
+
+[tasks.secrets]
+description = "Scan the working tree for secrets"
+run = "gitleaks dir . --redact --no-banner"
+
+[tasks.sbom]
+description = "Generate a CycloneDX JSON SBOM for the project filesystem"
+run = """
+set -eu
+source_name="${SYFT_SOURCE_NAME:-$(basename "$PWD")}"
+source_version="${SYFT_SOURCE_VERSION:-0.0.0}"
+export SYFT_CHECK_FOR_APP_UPDATE="${SYFT_CHECK_FOR_APP_UPDATE:-false}"
+rm -rf sbom
+mkdir -p sbom
+syft scan dir:. --source-name "$source_name" --source-version "$source_version" \
+  --exclude ./sbom --exclude ./.git --exclude ./build --exclude ./coverage \
+  --exclude ./.cache --exclude ./dist --exclude ./out \
+  --exclude './*.gcov' --exclude './*.gcda' --exclude './*.gcno' \
+  --output cyclonedx-json=sbom/sbom.cdx.json
+"""
+
+[tasks.fmt]
+description = "Format the project using detected language tasks"
+run = """
+set -eu
+ran=0
+
+if [ -f composer.json ]; then
+  mise run php:fmt
+  ran=1
+fi
+
+if [ -f pyproject.toml ]; then
+  mise run py:fmt
+  ran=1
+fi
+
+if [ -f package.json ] && [ -f tsconfig.json ]; then
+  mise run ts:fmt
+  ran=1
+fi
+
+if [ -f Cargo.toml ]; then
+  mise run rust:fmt
+  ran=1
+fi
+
+if [ -f alire.toml ] && find . -maxdepth 4 \\( -name '*.ads' -o -name '*.adb' -o -name '*.gpr' \\) -print -quit | grep -q .; then
+  mise run spark:fmt
+  ran=1
+fi
+
+if [ -f go.mod ]; then
+  mise run go:fmt
+  ran=1
+fi
+
+if [ -f mix.exs ]; then
+  mise run elixir:fmt
+  ran=1
+fi
+
+if [ -f cabal.project ] || find . -maxdepth 2 -name '*.cabal' -print -quit | grep -q .; then
+  mise run haskell:fmt
+  ran=1
+fi
+
+if [ -f fpm.toml ]; then
+  mise run fortran:fmt
+  ran=1
+fi
+
+if [ -f settings.gradle.kts ] || [ -f build.gradle.kts ]; then
+  mise run kotlin:fmt
+  ran=1
+fi
+
+if [ -f build.zig ]; then
+  mise run zig:fmt
+  ran=1
+fi
+
+if [ -f CMakeLists.txt ] && find . -maxdepth 4 -name '*.c' -print -quit | grep -q .; then
+  mise run c:fmt
+  ran=1
+fi
+
+if find . -maxdepth 3 \\( -name '*.sln' -o -name '*.csproj' \\) -print -quit | grep -q .; then
+  mise run csharp:fmt
+  ran=1
+fi
+
+if [ -f stylua.toml ] || [ -f .luarc.json ]; then
+  mise run lua:fmt
+  ran=1
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "No formatter tasks detected."
+fi
+"""
+
+[tasks."fmt:check"]
+description = "Check formatting using detected language tasks"
+run = """
+set -eu
+ran=0
+
+if [ -f composer.json ]; then
+  mise run php:fmt:check
+  ran=1
+fi
+
+if [ -f pyproject.toml ]; then
+  mise run py:fmt:check
+  ran=1
+fi
+
+if [ -f package.json ] && [ -f tsconfig.json ]; then
+  mise run ts:fmt:check
+  ran=1
+fi
+
+if [ -f Cargo.toml ]; then
+  mise run rust:fmt:check
+  ran=1
+fi
+
+if [ -f alire.toml ] && find . -maxdepth 4 \\( -name '*.ads' -o -name '*.adb' -o -name '*.gpr' \\) -print -quit | grep -q .; then
+  mise run spark:fmt:check
+  ran=1
+fi
+
+if [ -f go.mod ]; then
+  mise run go:fmt:check
+  ran=1
+fi
+
+if [ -f mix.exs ]; then
+  mise run elixir:fmt:check
+  ran=1
+fi
+
+if [ -f cabal.project ] || find . -maxdepth 2 -name '*.cabal' -print -quit | grep -q .; then
+  mise run haskell:fmt:check
+  ran=1
+fi
+
+if [ -f fpm.toml ]; then
+  mise run fortran:fmt:check
+  ran=1
+fi
+
+if [ -f settings.gradle.kts ] || [ -f build.gradle.kts ]; then
+  mise run kotlin:fmt:check
+  ran=1
+fi
+
+if [ -f build.zig ]; then
+  mise run zig:fmt:check
+  ran=1
+fi
+
+if [ -f CMakeLists.txt ] && find . -maxdepth 4 -name '*.c' -print -quit | grep -q .; then
+  mise run c:fmt:check
+  ran=1
+fi
+
+if find . -maxdepth 3 \\( -name '*.sln' -o -name '*.csproj' \\) -print -quit | grep -q .; then
+  mise run csharp:fmt:check
+  ran=1
+fi
+
+if [ -f stylua.toml ] || [ -f .luarc.json ]; then
+  mise run lua:fmt:check
+  ran=1
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "No formatting checks detected."
+fi
+"""
+
+[tasks.lint]
+description = "Lint/analyze using detected language tasks"
+run = """
+set -eu
+ran=0
+
+if [ -f composer.json ]; then
+  mise run php:lint
+  ran=1
+fi
+
+if [ -f pyproject.toml ]; then
+  mise run py:lint
+  ran=1
+fi
+
+if [ -f package.json ] && [ -f tsconfig.json ]; then
+  mise run ts:lint
+  ran=1
+fi
+
+if [ -f Cargo.toml ]; then
+  mise run rust:lint
+  ran=1
+fi
+
+if [ -f alire.toml ] && find . -maxdepth 4 \\( -name '*.ads' -o -name '*.adb' -o -name '*.gpr' \\) -print -quit | grep -q .; then
+  mise run spark:lint
+  ran=1
+fi
+
+if [ -f go.mod ]; then
+  mise run go:lint
+  ran=1
+fi
+
+if [ -f mix.exs ]; then
+  mise run elixir:lint
+  ran=1
+fi
+
+if [ -f cabal.project ] || find . -maxdepth 2 -name '*.cabal' -print -quit | grep -q .; then
+  mise run haskell:lint
+  ran=1
+fi
+
+if [ -f fpm.toml ]; then
+  mise run fortran:lint
+  ran=1
+fi
+
+if [ -f settings.gradle.kts ] || [ -f build.gradle.kts ]; then
+  mise run kotlin:lint
+  ran=1
+fi
+
+if [ -f build.zig ]; then
+  mise run zig:lint
+  ran=1
+fi
+
+if [ -f CMakeLists.txt ] && find . -maxdepth 4 -name '*.c' -print -quit | grep -q .; then
+  mise run c:lint
+  ran=1
+fi
+
+if find . -maxdepth 3 \\( -name '*.sln' -o -name '*.csproj' \\) -print -quit | grep -q .; then
+  mise run csharp:lint
+  ran=1
+fi
+
+if [ -f stylua.toml ] || [ -f .luarc.json ]; then
+  mise run lua:lint
+  ran=1
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "No lint tasks detected."
+fi
+"""
+
+[tasks.test]
+description = "Run tests using detected language tasks"
+run = """
+set -eu
+ran=0
+
+if [ -f composer.json ]; then
+  mise run php:test
+  ran=1
+fi
+
+if [ -f pyproject.toml ]; then
+  mise run py:test
+  ran=1
+fi
+
+if [ -f package.json ] && [ -f tsconfig.json ]; then
+  mise run ts:test
+  ran=1
+fi
+
+if [ -f Cargo.toml ]; then
+  mise run rust:test
+  ran=1
+fi
+
+if [ -f alire.toml ] && find . -maxdepth 4 \\( -name '*.ads' -o -name '*.adb' -o -name '*.gpr' \\) -print -quit | grep -q .; then
+  mise run spark:test
+  ran=1
+fi
+
+if [ -f go.mod ]; then
+  mise run go:test
+  ran=1
+fi
+
+if [ -f mix.exs ]; then
+  mise run elixir:test
+  ran=1
+fi
+
+if [ -f cabal.project ] || find . -maxdepth 2 -name '*.cabal' -print -quit | grep -q .; then
+  mise run haskell:test
+  ran=1
+fi
+
+if [ -f fpm.toml ]; then
+  mise run fortran:test
+  ran=1
+fi
+
+if [ -f settings.gradle.kts ] || [ -f build.gradle.kts ]; then
+  mise run kotlin:test
+  ran=1
+fi
+
+if [ -f build.zig ]; then
+  mise run zig:test
+  ran=1
+fi
+
+if [ -f CMakeLists.txt ] && find . -maxdepth 4 -name '*.c' -print -quit | grep -q .; then
+  mise run c:test
+  ran=1
+fi
+
+if find . -maxdepth 3 \\( -name '*.sln' -o -name '*.csproj' \\) -print -quit | grep -q .; then
+  mise run csharp:test
+  ran=1
+fi
+
+if [ -f stylua.toml ] || [ -f .luarc.json ]; then
+  mise run lua:test
+  ran=1
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "No test tasks detected."
+fi
+"""
+
+[tasks.standards]
+description = "Run standards autofixes using detected language tasks"
+run = """
+set -eu
+ran=0
+
+if [ -f composer.json ]; then
+  mise run php:standards
+  ran=1
+fi
+
+if [ -f pyproject.toml ]; then
+  mise run py:standards
+  ran=1
+fi
+
+if [ -f package.json ] && [ -f tsconfig.json ]; then
+  mise run ts:standards
+  ran=1
+fi
+
+if [ -f Cargo.toml ]; then
+  mise run rust:standards
+  ran=1
+fi
+
+if [ -f alire.toml ] && find . -maxdepth 4 \\( -name '*.ads' -o -name '*.adb' -o -name '*.gpr' \\) -print -quit | grep -q .; then
+  mise run spark:standards
+  ran=1
+fi
+
+if [ -f go.mod ]; then
+  mise run go:standards
+  ran=1
+fi
+
+if [ -f mix.exs ]; then
+  mise run elixir:standards
+  ran=1
+fi
+
+if [ -f cabal.project ] || find . -maxdepth 2 -name '*.cabal' -print -quit | grep -q .; then
+  mise run haskell:standards
+  ran=1
+fi
+
+if [ -f fpm.toml ]; then
+  mise run fortran:standards
+  ran=1
+fi
+
+if [ -f settings.gradle.kts ] || [ -f build.gradle.kts ]; then
+  mise run kotlin:standards
+  ran=1
+fi
+
+if [ -f build.zig ]; then
+  mise run zig:standards
+  ran=1
+fi
+
+if [ -f CMakeLists.txt ] && find . -maxdepth 4 -name '*.c' -print -quit | grep -q .; then
+  mise run c:standards
+  ran=1
+fi
+
+if find . -maxdepth 3 \\( -name '*.sln' -o -name '*.csproj' \\) -print -quit | grep -q .; then
+  mise run csharp:standards
+  ran=1
+fi
+
+if [ -f stylua.toml ] || [ -f .luarc.json ]; then
+  mise run lua:standards
+  ran=1
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "No standards tasks detected."
+fi
+"""
+
+[tasks."standards:check"]
+description = "Run standards CI checks using detected language tasks"
+run = """
+set -eu
+ran=0
+
+mise run secrets
+
+if [ -f composer.json ]; then
+  mise run php:standards:check
+  ran=1
+fi
+
+if [ -f pyproject.toml ]; then
+  mise run py:standards:check
+  ran=1
+fi
+
+if [ -f package.json ] && [ -f tsconfig.json ]; then
+  mise run ts:standards:check
+  ran=1
+fi
+
+if [ -f Cargo.toml ]; then
+  mise run rust:standards:check
+  ran=1
+fi
+
+if [ -f alire.toml ] && find . -maxdepth 4 \\( -name '*.ads' -o -name '*.adb' -o -name '*.gpr' \\) -print -quit | grep -q .; then
+  mise run spark:standards:check
+  ran=1
+fi
+
+if [ -f go.mod ]; then
+  mise run go:standards:check
+  ran=1
+fi
+
+if [ -f mix.exs ]; then
+  mise run elixir:standards:check
+  ran=1
+fi
+
+if [ -f cabal.project ] || find . -maxdepth 2 -name '*.cabal' -print -quit | grep -q .; then
+  mise run haskell:standards:check
+  ran=1
+fi
+
+if [ -f fpm.toml ]; then
+  mise run fortran:standards:check
+  ran=1
+fi
+
+if [ -f settings.gradle.kts ] || [ -f build.gradle.kts ]; then
+  mise run kotlin:standards:check
+  ran=1
+fi
+
+if [ -f build.zig ]; then
+  mise run zig:standards:check
+  ran=1
+fi
+
+if [ -f CMakeLists.txt ] && find . -maxdepth 4 -name '*.c' -print -quit | grep -q .; then
+  mise run c:standards:check
+  ran=1
+fi
+
+if find . -maxdepth 3 \\( -name '*.sln' -o -name '*.csproj' \\) -print -quit | grep -q .; then
+  mise run csharp:standards:check
+  ran=1
+fi
+
+if [ -f stylua.toml ] || [ -f .luarc.json ]; then
+  mise run lua:standards:check
+  ran=1
+fi
+
+if [ "$ran" = 0 ]; then
+  echo "No standards checks detected."
+fi
+"""

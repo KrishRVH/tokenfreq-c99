@@ -13,7 +13,7 @@
 **
 ** OOM INJECTION
 **
-**   Same glibc-specific approach as before (malloc/realloc interpose).
+**   OOM injection uses glibc malloc/realloc interposition.
 **
 ** FUZZING (libFuzzer)
 **
@@ -58,6 +58,10 @@ typedef struct {
 } wc_test_align_wrapper;
 
 #define WC_TEST_ALIGN WC_TEST_ALIGNOF(wc_test_align_wrapper)
+
+#ifndef WC_EXPECT_AUTOTUNE_RETRY
+#define WC_EXPECT_AUTOTUNE_RETRY 1
+#endif
 
 static int g_run, g_pass, g_fail;
 
@@ -1268,7 +1272,11 @@ static int test_dynamic_autotune_retries_smaller_layout(void)
         candidate *= 2u;
     }
 
+#if WC_EXPECT_AUTOTUNE_RETRY
+    ASSERT(exercised);
+#else
     (void)exercised; /* Some tiny configurations have no failing boundary. */
+#endif
     PASS();
     return 0;
 }
@@ -1462,7 +1470,7 @@ static int test_strict_max_bytes_blocks_peaks(void)
         if (rc == WC_OK)
             rc = wc_add(strict, "d");
         if (expect_fail)
-            ASSERT(rc == WC_NOMEM || rc == WC_ERROR);
+            ASSERT(rc == WC_NOMEM);
         else
             ASSERT(rc == WC_OK);
     }
@@ -1524,6 +1532,11 @@ static int test_add_null(void)
     ASSERT(wc_add(NULL, "x") == WC_ERROR);
     w = wc_open(0);
     ASSERT(wc_add(w, NULL) == WC_ERROR);
+    ASSERT(wc_add_n(w, NULL, 0) == WC_OK);
+    ASSERT(wc_add_norm_n(w, NULL, 0) == WC_OK);
+    ASSERT(wc_total(w) == 0);
+    ASSERT(wc_add_n(w, NULL, 1) == WC_ERROR);
+    ASSERT(wc_add_norm_n(w, NULL, 1) == WC_ERROR);
     wc_close(w);
     PASS();
     return 0;
@@ -1598,8 +1611,8 @@ static int test_add_n_embedded_nul_truncates(void)
     return 0;
 }
 
-/* Deterministic hash collision regression (different lengths).
-   Old buggy code could OOB-read under ASan on the second insert. */
+/* Regression: colliding tokens with different lengths must not read past the
+   shorter key. */
 static int test_add_hash_collision_different_length(void)
 {
     wc *w;

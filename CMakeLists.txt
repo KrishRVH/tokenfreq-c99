@@ -11,7 +11,7 @@ option(WC_BUILD_CLI "Build the wc CLI tool" ON)
 option(WC_INSTALL "Install library + CMake package config" OFF)
 option(WC_BUILD_SHARED "Build shared libraries (in addition to static)" OFF)
 option(WC_INSTALL_PKGCONFIG "Install pkg-config metadata when WC_INSTALL is ON" ON)
-option(WC_HASH_STRONG "Use keyed SipHash-2-4 instead of FNV-1a" OFF)
+option(WC_HASH_STRONG "Use keyed SipHash-2-4 instead of FNV-1a" ON)
 option(WC_USE_LIBC_STRING "Use libc string/memory functions" ON)
 option(WC_ENABLE_VALIDATE "Compile wc_validate() invariant checks" OFF)
 option(WC_BUILD_VARIANTS "Build heap/tiny library variants (same symbols; do not link together)" OFF)
@@ -197,6 +197,7 @@ if(WC_BUILD_VARIANTS)
     WC_MIN_INIT_CAP=8
     WC_MIN_BLOCK_SZ=64
     WC_MAX_WORD=32
+    WC_EXPECT_AUTOTUNE_RETRY=0
   )
   wc_apply_common(wordcount_lib_tiny)
   set_target_properties(wordcount_lib_tiny PROPERTIES
@@ -255,6 +256,13 @@ if(BUILD_TESTING)
   function(create_test_variant name lib)
     add_executable(${name} wc_test.c)
     target_link_libraries(${name} PRIVATE ${lib})
+    foreach(_wc_def HASH_STRONG USE_LIBC_STRING ENABLE_VALIDATE)
+      get_target_property(_wc_${_wc_def} ${lib} WC_DEF_${_wc_def})
+      if(NOT _wc_${_wc_def} STREQUAL "_wc_${_wc_def}-NOTFOUND")
+        set_target_properties(${name} PROPERTIES
+          WC_DEF_${_wc_def} "${_wc_${_wc_def}}")
+      endif()
+    endforeach()
     wc_apply_common(${name})
     add_test(NAME ${name} COMMAND ${name})
   endfunction()
@@ -266,6 +274,34 @@ if(BUILD_TESTING)
   if(TARGET wordcount_lib_tiny)
     create_test_variant(wc_test_tiny wordcount_lib_tiny)
   endif()
+
+  add_library(wordcount_lib_fnv STATIC wordcount.c)
+  set_target_properties(wordcount_lib_fnv PROPERTIES WC_DEF_HASH_STRONG 0)
+  wc_apply_common(wordcount_lib_fnv)
+  create_test_variant(wc_test_fnv wordcount_lib_fnv)
+
+  add_library(wordcount_lib_full_table_tiny STATIC wordcount.c)
+  target_compile_definitions(wordcount_lib_full_table_tiny PUBLIC
+    WC_STACK_BUFFER=0
+    WC_MIN_INIT_CAP=1
+    WC_DEFAULT_INIT_CAP=1
+    WC_EXPECT_AUTOTUNE_RETRY=0
+    WC_MIN_BLOCK_SZ=64
+    WC_DEFAULT_BLOCK_SZ=256
+    WC_MAX_WORD=32
+  )
+  wc_apply_common(wordcount_lib_full_table_tiny)
+  set_target_properties(wordcount_lib_full_table_tiny PROPERTIES
+    OUTPUT_NAME wordcount_full_table_tiny
+    EXPORT_NAME wordcount_full_table_tiny
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+  )
+  add_executable(wc_test_full_table_tiny tests/full_table_tiny.c)
+  target_link_libraries(wc_test_full_table_tiny PRIVATE
+    wordcount_lib_full_table_tiny)
+  wc_apply_common(wc_test_full_table_tiny)
+  add_test(NAME wc_test_full_table_tiny COMMAND wc_test_full_table_tiny)
 
   add_library(wordcount_lib_force_hash STATIC wordcount.c)
   target_compile_definitions(wordcount_lib_force_hash PRIVATE
@@ -437,14 +473,15 @@ if(BUILD_TESTING)
   wc_apply_common(wc_test_fault_heap)
   add_test(NAME wc_test_fault_heap COMMAND wc_test_fault_heap)
 
-  # Differential fuzzing target (build-only; run manually). Only build under Clang
-  # with libFuzzer available (skip on Apple toolchains where the runtime may be
-  # absent in CI images).
+  # Differential fuzzing target plus a short CTest smoke run. Only build under
+  # Clang with libFuzzer available (skip on Apple toolchains where the runtime
+  # may be absent in CI images).
   if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
     add_executable(wc_fuzz_diff wc_fuzz_diff.c wordcount.c)
     wc_apply_common(wc_fuzz_diff)
     target_compile_options(wc_fuzz_diff PRIVATE -fsanitize=fuzzer-no-link)
     target_link_options(wc_fuzz_diff PRIVATE -fsanitize=fuzzer)
+    add_test(NAME wc_fuzz_diff_smoke COMMAND wc_fuzz_diff -runs=1000)
   endif()
 
   function(wc_add_compile_only target src)
@@ -569,6 +606,11 @@ if(BUILD_TESTING)
   endif()
 
   if(WC_BUILD_CLI AND UNIX)
+    add_test(NAME wc_cli_behavior
+      COMMAND ${CMAKE_COMMAND}
+        -DWC_EXE=$<TARGET_FILE:wc>
+        -DWC_TMP_DIR=${PROJECT_BINARY_DIR}/cli-behavior
+        -P ${PROJECT_SOURCE_DIR}/tests/cli_behavior.cmake)
     add_test(NAME wc_cli_output_errors
       COMMAND ${CMAKE_COMMAND}
         -DWC_EXE=$<TARGET_FILE:wc>

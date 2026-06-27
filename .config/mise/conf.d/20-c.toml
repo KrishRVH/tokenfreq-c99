@@ -1,0 +1,79 @@
+[settings]
+experimental = true
+
+[tools]
+"pkgx:llvm.org" = "22.1.8"
+clang-format = "22.1.8"
+cmake = "4.3.4"
+ninja = "1.13.2"
+
+[tasks."c:fmt"]
+description = "Format C sources"
+run = """
+if command -v clang-format >/dev/null 2>&1; then
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files --cached --others --exclude-standard -z -- \
+      '*.c' '*.h' ':(exclude)build/**' ':(exclude)build-*/**' > "$tmp/files"
+  else
+    find . -type d \\( -name .git -o -name build -o -name 'build-*' \\) -prune \
+      -o -type f \\( -name '*.c' -o -name '*.h' \\) -print0 > "$tmp/files"
+  fi
+  if [ -s "$tmp/files" ]; then
+    xargs -0 clang-format -i < "$tmp/files"
+  fi
+else
+  echo "clang-format is required for C formatting." >&2
+  exit 1
+fi
+"""
+
+[tasks."c:fmt:check"]
+description = "Check C source formatting"
+run = """
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git ls-files --cached --others --exclude-standard -z -- \
+    '*.c' '*.h' ':(exclude)build/**' ':(exclude)build-*/**' > "$tmp/files"
+else
+  find . -type d \\( -name .git -o -name build -o -name 'build-*' \\) -prune \
+    -o -type f \\( -name '*.c' -o -name '*.h' \\) -print0 > "$tmp/files"
+fi
+if [ ! -s "$tmp/files" ]; then
+  exit 0
+fi
+xargs -0 -n 1 sh -c '
+  for file do
+    clang-format "$file" | cmp -s "$file" - || {
+      echo "Needs formatting: $file" >&2
+      exit 1
+    }
+  done
+' sh < "$tmp/files"
+"""
+
+[tasks."c:lint"]
+description = "Run C static checks"
+run = """
+cmake --preset clang
+cmake --build --preset clang
+./c-quality.sh . build/clang
+"""
+
+[tasks."c:test"]
+description = "Run C tests"
+run = "./c-build.sh"
+
+[tasks."c:standards"]
+description = "Run the C standards workflow with autofixes"
+run = "mise run c:fmt"
+
+[tasks."c:standards:check"]
+description = "Run the C standards CI gate"
+run = """
+mise run c:fmt:check
+mise run c:lint
+mise run c:test
+"""

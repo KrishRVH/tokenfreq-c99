@@ -14,15 +14,8 @@
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_BUILD_TYPE": "Debug",
+        "WC_HASH_STRONG": "ON",
         "WC_WERROR": "ON"
-      }
-    },
-    {
-      "name": "clang-stronghash",
-      "inherits": "clang",
-      "displayName": "Clang (ASan/UBSan + WC_HASH_STRONG)",
-      "cacheVariables": {
-        "WC_HASH_STRONG": "ON"
       }
     },
     {
@@ -61,46 +54,64 @@
         "ENABLE_SANITIZERS": "OFF",
         "WC_MINGW_STATIC": "ON"
       }
+    },
+    {
+      "name": "install-check",
+      "inherits": "base",
+      "displayName": "Clang install/package consumer check",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_INSTALL_LIBDIR": "lib",
+        "ENABLE_SANITIZERS": "OFF",
+        "WC_BUILD_SHARED": "ON",
+        "WC_INSTALL": "ON"
+      }
+    },
+    {
+      "name": "coverage",
+      "inherits": "base",
+      "displayName": "GCC coverage",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_C_FLAGS": "--coverage",
+        "CMAKE_EXE_LINKER_FLAGS": "--coverage",
+        "CMAKE_SHARED_LINKER_FLAGS": "--coverage",
+        "ENABLE_SANITIZERS": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "clang",    "configurePreset": "clang" },
-    { "name": "clang-stronghash", "configurePreset": "clang-stronghash" },
-    { "name": "gcc",      "configurePreset": "gcc" },
+    { "name": "clang", "configurePreset": "clang" },
+    { "name": "gcc", "configurePreset": "gcc" },
     { "name": "compcert", "configurePreset": "compcert" },
-    { "name": "mingw",    "configurePreset": "mingw" }
+    { "name": "mingw", "configurePreset": "mingw" },
+    { "name": "install-check", "configurePreset": "install-check" },
+    { "name": "coverage", "configurePreset": "coverage" }
   ],
   "testPresets": [
     {
       "name": "clang",
       "configurePreset": "clang",
-      "output": { "outputOnFailure": true },
-      "environment": {
-        "ASAN_OPTIONS": "detect_leaks=0",
-        "LSAN_OPTIONS": "detect_leaks=0"
-      }
-    },
-    {
-      "name": "clang-stronghash",
-      "configurePreset": "clang-stronghash",
-      "output": { "outputOnFailure": true },
-      "environment": {
-        "ASAN_OPTIONS": "detect_leaks=0",
-        "LSAN_OPTIONS": "detect_leaks=0"
-      }
+      "output": { "outputOnFailure": true }
     },
     {
       "name": "gcc",
       "configurePreset": "gcc",
-      "output": { "outputOnFailure": true },
-      "environment": {
-        "ASAN_OPTIONS": "detect_leaks=0",
-        "LSAN_OPTIONS": "detect_leaks=0"
-      }
+      "output": { "outputOnFailure": true }
     },
     {
       "name": "compcert",
       "configurePreset": "compcert",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "install-check",
+      "configurePreset": "install-check",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage",
       "output": { "outputOnFailure": true }
     }
   ]

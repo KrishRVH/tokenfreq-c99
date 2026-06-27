@@ -43,16 +43,24 @@ static void make_word4(size_t i, char out[5])
 
 /* --- Fault tests ----------------------------------------------------- */
 
-static void run_fault_open(int max_fail)
+static int run_fault_open(int max_fail)
 {
     for (int i = 1; i <= max_fail; i++) {
         int open_rc = WC_OK;
         fault_arm(i);
         wc *w = wc_open_ex(0, NULL, &open_rc);
         fault_reset();
-        if (w)
+        if (w) {
+            if (open_rc != WC_OK) {
+                wc_close(w);
+                return 1;
+            }
             wc_close(w);
+        } else if (open_rc != WC_NOMEM) {
+            return 1;
+        }
     }
+    return 0;
 }
 
 static int run_fault_add(int max_fail)
@@ -291,7 +299,8 @@ int main(void)
 
     if (test_results_free_null_does_not_call_custom_free())
         return 1;
-    run_fault_open(max_fail);
+    if (run_fault_open(max_fail))
+        return 1;
     if (run_fault_add(max_fail))
         return 1;
     if (run_fault_scan(max_fail))

@@ -28,7 +28,7 @@ static int test_tiny_static_fails(void)
     wc_limits lim = WC_LIMITS_INIT();
     int rc = WC_OK;
     WC_STATIC_BUFFER(tiny, 32);
-    wc *w;
+    const wc *w;
 
     lim.static_buf = tiny.buf;
     lim.static_size = sizeof tiny.buf;
@@ -46,7 +46,7 @@ static int test_static_requires_trust_without_uintptr(void)
     wc_limits lim = WC_LIMITS_INIT();
     int rc = WC_OK;
     WC_STATIC_BUFFER(pool, 65536);
-    wc *w;
+    const wc *w;
 
     lim.static_buf = pool.buf;
     lim.static_size = sizeof pool.buf;
@@ -186,7 +186,7 @@ static int test_stream_open_unavailable_without_heap(void)
 {
     wc_limits lim = WC_LIMITS_INIT();
     int rc = WC_ERROR;
-    wc_stream *s;
+    const wc_stream *s;
     WC_STATIC_BUFFER(pool, 65536);
     wc *w;
 

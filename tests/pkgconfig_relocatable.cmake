@@ -66,3 +66,62 @@ execute_process(
 if(NOT run_rc EQUAL 0)
   message(FATAL_ERROR "consumer exited ${run_rc}")
 endif()
+
+set(cmake_consumer "${WC_INSTALL_PREFIX}/cmake-consumer")
+get_filename_component(WC_LIBDIR "${WC_PKGCONFIG_DIR}" DIRECTORY)
+set(wordcount_config_dir "${WC_INSTALL_PREFIX}/${WC_LIBDIR}/cmake/wordcount")
+if(NOT EXISTS "${wordcount_config_dir}/wordcountConfig.cmake")
+  message(FATAL_ERROR "Installed CMake config is missing: ${wordcount_config_dir}/wordcountConfig.cmake")
+endif()
+file(MAKE_DIRECTORY "${cmake_consumer}")
+file(WRITE "${cmake_consumer}/CMakeLists.txt"
+     "cmake_minimum_required(VERSION 3.20)\n"
+     "project(wordcount_cmake_consumer LANGUAGES C)\n"
+     "find_package(wordcount CONFIG REQUIRED)\n"
+     "add_executable(consumer_static main.c)\n"
+     "target_link_libraries(consumer_static PRIVATE wordcount::wordcount)\n"
+     "if(TARGET wordcount::wordcount_shared)\n"
+     "  add_executable(consumer_shared main.c)\n"
+     "  target_link_libraries(consumer_shared PRIVATE wordcount::wordcount_shared)\n"
+     "  set_target_properties(consumer_shared PROPERTIES BUILD_RPATH \"$<TARGET_FILE_DIR:wordcount::wordcount_shared>\")\n"
+     "endif()\n")
+file(WRITE "${cmake_consumer}/main.c"
+     "#include <wordcount.h>\n"
+     "int main(void) { return wc_version()[0] ? 0 : 1; }\n")
+
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -S "${cmake_consumer}"
+          -B "${cmake_consumer}/build" -G Ninja
+          "-Dwordcount_DIR:PATH=${wordcount_config_dir}"
+  RESULT_VARIABLE cmake_config_rc
+  OUTPUT_VARIABLE cmake_config_out
+  ERROR_VARIABLE cmake_config_err)
+if(NOT cmake_config_rc EQUAL 0)
+  message(FATAL_ERROR
+          "CMake consumer configure failed\nwordcount_DIR=${wordcount_config_dir}\n"
+          "${cmake_config_out}\n${cmake_config_err}")
+endif()
+
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" --build "${cmake_consumer}/build"
+  RESULT_VARIABLE cmake_build_rc
+  OUTPUT_VARIABLE cmake_build_out
+  ERROR_VARIABLE cmake_build_err)
+if(NOT cmake_build_rc EQUAL 0)
+  message(FATAL_ERROR
+          "CMake consumer build failed\n${cmake_build_out}\n${cmake_build_err}")
+endif()
+
+set(cmake_consumer_exes consumer_static)
+if(EXISTS "${cmake_consumer}/build/consumer_shared")
+  list(APPEND cmake_consumer_exes consumer_shared)
+endif()
+
+foreach(exe IN LISTS cmake_consumer_exes)
+  execute_process(
+    COMMAND "${cmake_consumer}/build/${exe}"
+    RESULT_VARIABLE cmake_run_rc)
+  if(NOT cmake_run_rc EQUAL 0)
+    message(FATAL_ERROR "CMake consumer ${exe} exited ${cmake_run_rc}")
+  endif()
+endforeach()

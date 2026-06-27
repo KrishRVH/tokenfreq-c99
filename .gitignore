@@ -1,16 +1,198 @@
-# Build Systems
-/build*/
-cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-CTestTestfile.cmake
-Makefile
-compile_commands.json
+# Intent: ignore generated/local artifacts only. Keep lockfiles, fixtures,
+# corpora, examples, Makefiles, and shared editor config visible by default.
 
-wordcount
-wordcount_c
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
 
-# IDE
-.idea/
-.gstack/
+# Editor temporary files, not editor project config
+*.swp
+*.swo
+*~
+.#*
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+/.tmp/
+/tmp/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency directories
+node_modules/
+/vendor/
+
+# Generic generated output
+/.gstack/
+/.cache/
+/build/
+/coverage/
+/dist/
+/out/
+/sbom/
+
+# JavaScript / TypeScript
+*.tsbuildinfo
+.eslintcache
+/.angular/
+/.astro/
+/.next/
+/.nuxt/
+/.nyc_output/
+/.parcel-cache/
+/.svelte-kit/
+/.turbo/
+/.vite/
+
+# Python
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.egg-info/
+/htmlcov/
+
+# mise
+mise.local.toml
+mise.*.local.toml
+.mise.local.toml
+.mise.*.local.toml
+mise.local.lock
+mise.*.local.lock
+.mise.local.lock
+.mise.*.local.lock
+
+# Dagger module local output
+/dagger/.turbo/
+/dagger/dist/
+
+# PHP
+/.phpstan.cache/
+/.phpunit.cache/
+/.phpunit.result.cache
+/.rector-cache/
+/composer.phar
+/var/cache/
+/var/log/
+
+# C# / .NET
+/.vs/
+/artifacts/
+/TestResults/
+**/[Bb]in/[Dd]ebug/
+**/[Bb]in/[Rr]elease/
+**/[Oo]bj/
+*.nupkg
+*.pdb
+*.snupkg
+*.sln.docstates
+*.suo
+*.user
+*.userosscache
+
+# C / CMake
+/CMakeCache.txt
+/CMakeFiles/
+/CMakeUserPresets.json
+/CTestTestfile.cmake
+/DartConfiguration.tcl
+/Testing/
+/cmake_install.cmake
+/compile_commands.json
+/.ninja_deps
+/.ninja_log
+*.a
+*.dll
+*.dylib
+*.exe
+*.gch
+*.gcda
+*.gcno
+*.gcov
+*.ifc
+*.lib
+*.o
+*.obj
+*.pch
+*.pcm
+*.profdata
+*.profraw
+*.so
+*.dSYM/
+
+# Rust
+/.cargo-tools/
+**/.cargo-tools/
+/target/
+**/target/
+**/*.rs.bk
+
+# Lua
+.lua-language-server/
+.lua_modules/
+*.luac
+luac.out
+
+# Go
+*.test
+
+# Fortran
+*.mod
+!go.mod
+*.smod
+
+# JVM / Kotlin / Gradle
+/.gradle/
+/.kotlin/
+*.class
+hs_err_pid*
+replay_pid*
+
+# Elixir / Erlang
+/_build/
+/deps/
+/.elixir_ls/
+/cover/
+/doc/
+erl_crash.dump
+rebar3.crashdump
+*.beam
+*.ez
+*.plt
+*.plt.hash
+
+# Haskell
+/dist-newstyle/
+/.stack-work/
+cabal.project.local
+cabal.project.local~
+.ghc.environment.*
+.hpc/
+*.hi
+*.dyn_hi
+*.dyn_o
+*.hie
+*.hp
+*.prof
+*.tix
+*.eventlog
+
+# Zig
+/.zig-cache/
+/zig-cache/
+/zig-out/
+/zig-pkg/

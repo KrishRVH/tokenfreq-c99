@@ -17,7 +17,8 @@
 **   wc_scan accepts arbitrary byte sequences up to WC_PTRDIFF_MAX bytes.
 **   wc_add/wc_add_n do not fold case and store the supplied bytes up to the
 **   first NUL; wc_add_norm_n does not tokenize and folds that same prefix using
-**   ASCII rules.
+**   ASCII rules. Zero-length wc_add_n, wc_add_norm_n, wc_scan, and
+**   wc_stream_scan_ex calls are no-ops and may use NULL input pointers.
 **
 **   Maximum length: max_word is clamped into [4, WC_MAX_WORD]. Bytes
 **   beyond max_word are truncated (still counted); truncation never
@@ -50,11 +51,6 @@
 **   Public helpers: wc_limits_init, WC_LIMITS_INIT, WC_STATIC_BUFFER.
 **   Supported build-configuration macros are documented below; they are not
 **   callable API surface.
-**
-** PRE-SHIP POLICY
-**
-**   This library has not shipped yet. The public surface is intentionally kept
-**   small and may be reduced before release if that removes unsafe contracts.
 */
 #ifndef WORDCOUNT_H
 #define WORDCOUNT_H
@@ -76,7 +72,7 @@
 #endif
 
 #ifndef WC_HASH_STRONG
-#define WC_HASH_STRONG 0
+#define WC_HASH_STRONG 1
 #endif
 
 #ifndef WC_USE_LIBC_STRING
@@ -258,7 +254,7 @@
 #if defined(SIZE_MAX)
 #define WC_SIZE_MAX SIZE_MAX
 #else
-#define WC_SIZE_MAX ((size_t) - 1)
+#define WC_SIZE_MAX ((size_t)-1)
 #endif
 #endif
 
@@ -319,11 +315,11 @@ extern "C" {
 #define WC_WUR
 #endif
 
+/* --- Versioning ------------------------------------------------------- */
 /*
-** Version information. The version number is encoded as:
+** Version number encoding:
 **   (MAJOR * 1000000) + (MINOR * 1000) + PATCH
-** 5.0.0: canonical struct_size-based limits/build info; single open/stream API
-** --- Versioning ------------------------------------------------------- */
+*/
 
 #define WC_VERSION "5.0.0"
 #define WC_VERSION_NUMBER 5000000UL
@@ -670,20 +666,17 @@ typedef struct wc_limits {
 #define WC_LIMITS_INIT()                          \
     {                                             \
         sizeof(wc_limits), /* struct_size */      \
-                0,         /* max_bytes */        \
-                0,         /* strict_max_bytes */ \
-                0,         /* init_cap */         \
-                0,         /* block_size */       \
-                0,         /* static_buf */       \
-                0,         /* static_size */      \
-                0ul        /* hash_seed */        \
+        0,                 /* max_bytes */        \
+        0,                 /* strict_max_bytes */ \
+        0,                 /* init_cap */         \
+        0,                 /* block_size */       \
+        0,                 /* static_buf */       \
+        0,                 /* static_size */      \
+        0ul                /* hash_seed */        \
     }
 #else
 /* C99 constant initializer (valid for static storage). */
-#define WC_LIMITS_INIT()                 \
-    {                                    \
-        .struct_size = sizeof(wc_limits) \
-    }
+#define WC_LIMITS_INIT() { .struct_size = sizeof(wc_limits) }
 #endif
 
 /* Recommended initializer (sets struct_size and zeroes all fields). */
@@ -817,8 +810,10 @@ WC_API void wc_close(wc *w);
 WC_API WC_WUR int wc_add(wc *w, const char *word);
 WC_API WC_WUR int wc_add_n(wc *w, const char *word, size_t len);
 WC_API WC_WUR int wc_add_norm_n(wc *w, const char *word, size_t len);
-/* Note: for length-based adds, embedded '\0' terminates the word (prefix is used). */
-/* wc_scan rejects len > WC_PTRDIFF_MAX with WC_ERROR. */
+/* Length-based adds accept word==NULL only when len==0. Embedded '\0'
+   terminates the word (prefix is used). */
+/* wc_scan accepts text==NULL only when len==0 and rejects len > WC_PTRDIFF_MAX
+   with WC_ERROR. */
 WC_API WC_WUR int wc_scan(wc *w, const char *text, size_t len);
 
 /*
@@ -839,7 +834,7 @@ WC_API size_t wc_unique(const wc *w);
 **   n:   Receives array length
 **
 ** Returns WC_OK, WC_ERROR (bad args), or WC_NOMEM.
-** On empty results, *out=NULL and *n=0 with WC_OK return.
+** On empty heap-enabled results, *out=NULL and *n=0 with WC_OK return.
 **
 ** Note: The temporary results array is allocated via WC_MALLOC and
 ** is not counted against max_bytes in wc_limits, nor against any
@@ -893,8 +888,8 @@ WC_API void wc_cursor_init(wc_cursor *c, const wc *w);
 /*
 ** Advance to the next word.
 **
-**   word:  Receives pointer to the stored word string.
-**   count: Receives the occurrence count.
+**   word:  Optional output pointer for the stored word string.
+**   count: Optional output pointer for the occurrence count.
 **
 ** Returns 1 if a word was found, 0 if iteration is complete.
 */
@@ -963,8 +958,8 @@ WC_API wc_stream *wc_stream_open(wc *w, int *err_out);
 /*
 ** Scan a chunk. consumed_out (optional) receives the number of bytes
 ** consumed before returning. On WC_OK before finish, consumed_out == len.
-** len must be <= WC_PTRDIFF_MAX; larger chunks return WC_ERROR with no
-** progress.
+** buf may be NULL only when len==0. len must be <= WC_PTRDIFF_MAX; larger
+** chunks return WC_ERROR with no progress.
 ** After a terminal wc_stream_finish() result, wc_stream_scan_ex() returns the
 ** saved finish status and leaves consumed_out at 0.
 ** If insertion of a buffered word fails while scanning a separator, the stream

@@ -37,7 +37,7 @@ behavior.
 | `WC_HAVE_UINTPTR` | auto | If `1`, `uintptr_t` is available. Static-buffer alignment checks use it only when `WC_LINEAR_UINTPTR_ALIGNMENT=1`. |
 | `WC_LINEAR_UINTPTR_ALIGNMENT` | `WC_HAVE_UINTPTR` | If `1`, `(uintptr_t)p % align` is assumed to reflect object alignment. Set to `0` on segmented or non-linear pointer-integer targets. |
 | `WC_TRUST_STATIC_BUFFER_ALIGNMENT` | `0` | If `1`, static-buffer alignment is a caller precondition when no runtime alignment check is available. |
-| `WC_HASH_STRONG` | `0` | If `1`, use SipHash-2-4; otherwise use FNV-1a. |
+| `WC_HASH_STRONG` | `1` | If `1`, use SipHash-2-4; otherwise use FNV-1a. |
 | `WC_STACK_BUFFER` | `1` | If `0`, scan and normalization scratch buffers are allocated from heap/static storage and counted. |
 | `WC_STACK_MAX_WORD` | `4096` | Maximum permitted `WC_MAX_WORD` when `WC_STACK_BUFFER=1`; ignored otherwise. |
 
@@ -68,6 +68,8 @@ within `WC_PTRDIFF_MAX`.
 - `wc_add_norm_n` folds the supplied prefix but does not tokenize it.
 - Length-based add APIs stop at the first embedded `'\0'` so stored words remain
   valid C strings.
+- Zero-length `wc_add_n`, `wc_add_norm_n`, `wc_scan`, and `wc_stream_scan_ex`
+  calls are no-ops and may pass `NULL` as the input pointer.
 - `wc_scan` and `wc_stream_scan_ex` reject buffers larger than
   `WC_PTRDIFF_MAX` with `WC_ERROR`.
 - Runtime `max_word` is clamped into `[4, WC_MAX_WORD]`; longer words are
@@ -127,8 +129,9 @@ Static-buffer contracts:
 - `wc_topn(w, n)` is a prefix of the full sorted result for that `n`.
 - `wc_cursor` is zero-allocation enumeration. Its order is unspecified.
 - In `WC_NO_HEAP=1` builds, `wc_results` and `wc_topn` return `WC_NOMEM` for
-  valid result-output calls. `wc_stream_open` returns `NULL` and writes
-  `WC_NOMEM` to `err_out` when provided. Use `wc_cursor` and `wc_scan`.
+  valid result-output calls, including empty counters. `wc_stream_open` returns
+  `NULL` and writes `WC_NOMEM` to `err_out` when provided. Use `wc_cursor` and
+  `wc_scan`.
 
 ## Streaming Semantics
 
@@ -148,6 +151,7 @@ Static-buffer contracts:
   detached streams, or oversized chunks does not provide forward progress.
 - If a parent `wc` is closed before an open stream, the stream is detached:
   later scan/finish calls return `WC_ERROR`, and `wc_stream_close` remains safe.
+
 ## Public API
 
 Public exported functions:

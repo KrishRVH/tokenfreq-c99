@@ -26,7 +26,8 @@ output counts matches with the zero-allocation cursor.
 - `0` success
 - `1` runtime failure (I/O, OOM/allocation, invalid `WC_MAX_BYTES`, output
   errors)
-- `2` usage/argument errors
+- `2` usage/argument errors; usage diagnostics keep this exit code even if the
+  diagnostic stream itself fails.
 
 ## Options
 
@@ -43,6 +44,8 @@ output counts matches with the zero-allocation cursor.
   - `--max-bytes BYTES` – set the internal memory budget (table/arena/scanbuf).
   - `--strict-max-bytes` – enforce that budget as a hard peak cap for tracked
     internal allocations. Requires a nonzero `--max-bytes` or `WC_MAX_BYTES`.
+    Result arrays and stream objects are outside this cap; use `--quiet` to
+    avoid result-array allocation.
 - Misc:
   - `--version`
   - `-h, --help`

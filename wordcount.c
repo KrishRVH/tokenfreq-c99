@@ -13,8 +13,8 @@
 ** Notable robustness properties:
 **   - Overflow-checked size arithmetic before allocations
 **   - Defined behavior on allocation failure (WC_NOMEM)
-**   - Default build: consistent 32-bit FNV-1a hashing across platforms (seeded basis)
-**   - Optional strong hash: SipHash-2-4 (keyed from hash_seed) with a stored 32-bit slot hash
+**   - Default build: SipHash-2-4 keyed from hash_seed
+**   - Optional FNV-1a build: consistent 32-bit hashing across platforms
 **   - Collision-safe comparisons (stores key length per slot)
 **
 **   - All allocations that count against wc_limits budgets (table, arena blocks,
@@ -39,10 +39,6 @@
 **   The public header accepts WC_U32_T/WC_U64_T build macros so internal hashing
 **   integer widths stay explicit and portable without leaking those types into
 **   API signatures.
-** Platform assumptions (enforced at compile time):
-**   - CHAR_BIT == 8
-**   - ASCII-compatible execution character set
-**   - 32-bit unsigned type available via WC_U32_T (defaults to uint32_t)
 */
 
 #include "wordcount.h"
@@ -181,6 +177,11 @@ static void *wc_memchr_internal(const void *s, int c, size_t n)
 #endif
 }
 
+static int wc_struct_has_field(size_t struct_size, size_t offset, size_t size)
+{
+    return offset <= WC_SIZE_MAX - size && struct_size >= offset + size;
+}
+
 static int wc_load_limits(wc_limits *out, const wc_limits *in)
 {
     size_t in_size;
@@ -197,12 +198,13 @@ static int wc_load_limits(wc_limits *out, const wc_limits *in)
         return WC_ERROR;
 
     wc_limits_init(out);
-#define WC_COPY_FIELD(field)                                                \
-    do {                                                                    \
-        if (in_size >=                                                      \
-            offsetof(wc_limits, field) + sizeof(((wc_limits *)0)->field)) { \
-            out->field = in->field;                                         \
-        }                                                                   \
+#define WC_COPY_FIELD(field)                                        \
+    do {                                                            \
+        if (wc_struct_has_field(in_size,                            \
+                                offsetof(wc_limits, field),         \
+                                sizeof(((wc_limits *)0)->field))) { \
+            out->field = in->field;                                 \
+        }                                                           \
     } while (0)
 
     WC_COPY_FIELD(max_bytes);
@@ -1246,6 +1248,9 @@ static void *wc_xmalloc(wc *w, size_t n)
 ** In static-buffer mode it is a no-op; memory is never recycled
 ** inside the static buffer.
 */
+/* cppcheck-suppress constParameterPointer
+** Heap builds mutate w->alloc, and p must remain mutable for WC_FREE.
+*/
 static void wc_xfree(wc *w, void *p, size_t n)
 {
     if (!w || !p)
@@ -1633,7 +1638,7 @@ static int tab_grow(wc *w)
     if (!wc_mul_object_span(nc, sizeof(Slot), &alloc))
         return -1;
 
-        /* NOTE: open-addressing depends on (cap-1) masking. Changing cap requires
+    /* NOTE: open-addressing depends on (cap-1) masking. Changing cap requires
        a full rehash into a new table. Do NOT "grow in place" unless you
        rehash (otherwise lookups break). */
 
@@ -1961,41 +1966,49 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
     }
 #endif
 
+#if WC_INTERNAL_BOOL(WC_NO_HEAP)
+    if (wc_load_limits(&lim_local, limits) != WC_OK) {
+        err = WC_EBADLIMITS;
+        WC_SET_ERRNO(EINVAL);
+        goto fail;
+    }
+    have_limits = 1;
+#else
     if (limits) {
         if (wc_load_limits(&lim_local, limits) != WC_OK) {
             err = WC_EBADLIMITS;
             WC_SET_ERRNO(EINVAL);
             goto fail;
         }
-
         have_limits = 1;
-        lim_max_bytes = lim_local.max_bytes;
-        lim_init_cap = lim_local.init_cap;
-        lim_block_size = lim_local.block_size;
-        lim_static_buf = lim_local.static_buf;
-        lim_static_size = lim_local.static_size;
-        lim_hash_seed = lim_local.hash_seed;
-        lim_strict_max_bytes = lim_local.strict_max_bytes;
+#endif
+    lim_max_bytes = lim_local.max_bytes;
+    lim_init_cap = lim_local.init_cap;
+    lim_block_size = lim_local.block_size;
+    lim_static_buf = lim_local.static_buf;
+    lim_static_size = lim_local.static_size;
+    lim_hash_seed = lim_local.hash_seed;
+    lim_strict_max_bytes = lim_local.strict_max_bytes;
 
-        /* Enforce consistency: static mode requires BOTH buf and size. */
-        if ((lim_static_buf && lim_static_size == 0) ||
-            (!lim_static_buf && lim_static_size != 0)) {
+    /* Enforce consistency: static mode requires BOTH buf and size. */
+    if ((lim_static_buf && lim_static_size == 0) ||
+        (!lim_static_buf && lim_static_size != 0)) {
+        err = WC_EBADLIMITS;
+        WC_SET_ERRNO(EINVAL);
+        goto fail;
+    }
+    if (lim_static_buf && lim_static_size) {
+        if (!wc_object_span_valid(lim_static_size)) {
             err = WC_EBADLIMITS;
             WC_SET_ERRNO(EINVAL);
             goto fail;
         }
-        if (lim_static_buf && lim_static_size) {
-            if (!wc_object_span_valid(lim_static_size)) {
-                err = WC_EBADLIMITS;
-                WC_SET_ERRNO(EINVAL);
-                goto fail;
-            }
 #if !(WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) &&              \
       WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)) && \
         !WC_INTERNAL_BOOL(WC_TRUST_STATIC_BUFFER_ALIGNMENT)
-            err = WC_EBADLIMITS;
-            WC_SET_ERRNO(EINVAL);
-            goto fail;
+        err = WC_EBADLIMITS;
+        WC_SET_ERRNO(EINVAL);
+        goto fail;
 #else
             if (!wc_ptr_aligned(lim_static_buf, WC_ALIGN)) {
                 err = WC_EALIGN;
@@ -2003,16 +2016,17 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits, int *err_out)
                 goto fail;
             }
 #endif
-        }
+    }
 
 #if WC_INTERNAL_BOOL(WC_NO_HEAP)
-        if (!lim_static_buf || lim_static_size == 0) {
-            err = WC_EBADLIMITS;
-            WC_SET_ERRNO(EINVAL);
-            goto fail;
-        }
-#endif
+    if (!lim_static_buf || lim_static_size == 0) {
+        err = WC_EBADLIMITS;
+        WC_SET_ERRNO(EINVAL);
+        goto fail;
     }
+#else
+    }
+#endif
 
     {
         wc_limits lim_tune;
@@ -2214,7 +2228,7 @@ badlimits:
         w->alloc.bytes_used = static_reserve;
     }
 
-    /* Seed: 32-bit basis with optional fold-down of hash_seed. */
+    /* Seed material: fold hash_seed into the 32-bit stored seed. */
     {
         wc_hash_t basis = FNV_OFF_32;
         if (lim_hash_seed) {
@@ -2373,6 +2387,8 @@ wc_add_impl(wc *w,
                 return WC_OK;
         }
     }
+    if (n == 0)
+        return WC_OK;
 
     if (normalize) {
         size_t i;
@@ -2478,13 +2494,10 @@ int wc_scan(wc *w, const char *text, size_t len)
         {
             wc_hash_t h = wc_hash_bytes(buf, n, w->seed);
             const int trc = tab_insert(w, buf, n, h);
-            if (trc == 0) {
-                /* ok */
-            } else if (trc == -2) {
+            if (trc == -2)
                 return WC_ERROR;
-            } else {
+            if (trc != 0)
                 return WC_NOMEM;
-            }
         }
     }
 

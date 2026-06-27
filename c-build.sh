@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+cd "$ROOT"
 
 run_preset() {
   local preset="$1"
@@ -19,7 +20,17 @@ run_preset() {
   fi
 }
 
-presets=(clang clang-stronghash gcc)
+run_install_check() {
+  echo "----------------------------------------------------"
+  echo "Running install/package consumer check"
+  echo "----------------------------------------------------"
+
+  cmake --preset install-check
+  cmake --build --preset install-check --parallel "$JOBS"
+  ctest --preset install-check
+}
+
+presets=(clang gcc)
 
 if command -v ccomp >/dev/null 2>&1; then
   presets+=(compcert)
@@ -37,6 +48,8 @@ for p in "${presets[@]}"; do
   run_preset "$p"
 done
 
+run_install_check
+
 # Quality checks: run on repo sources, use build/clang if present
 echo "----------------------------------------------------"
 echo "Running quality checks"
@@ -47,4 +60,4 @@ else
   "$ROOT/c-quality.sh" "$ROOT"
 fi
 
-echo "✅ GAMUT COMPLETE"
+echo "GAMUT COMPLETE"

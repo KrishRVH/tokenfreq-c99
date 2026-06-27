@@ -128,7 +128,7 @@ static int validate_rejects_unreachable_slot(void)
 static int validate_rejects_duplicate_key(void)
 {
     wc *w = wc_open(0);
-    Slot *s;
+    const Slot *s;
     size_t idx;
     size_t dup_idx;
 

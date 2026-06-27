@@ -235,6 +235,68 @@ static int cli_flush(FILE *out)
     return ferror(out) ? -1 : 0;
 }
 
+static int diag_fputs_quoted(FILE *out, const char *s)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    if (cli_putc(out, '"') < 0)
+        return -1;
+    while (s && *s) {
+        unsigned char c = (unsigned char)*s++;
+
+        if (c == '"' || c == '\\') {
+            if (cli_putc(out, '\\') < 0 || cli_putc(out, c) < 0)
+                return -1;
+        } else if (c >= 0x20u && c < 0x7fu) {
+            if (cli_putc(out, c) < 0)
+                return -1;
+        } else if (cli_fputs(out, "\\x") < 0 ||
+                   cli_putc(out, hex[(c >> 4) & 0x0fu]) < 0 ||
+                   cli_putc(out, hex[c & 0x0fu]) < 0) {
+            return -1;
+        }
+    }
+    return cli_putc(out, '"');
+}
+
+static void diag_arg(const char *prefix, const char *value)
+{
+    (void)cli_fputs(stderr, prefix);
+    (void)diag_fputs_quoted(stderr, value);
+    (void)cli_putc(stderr, '\n');
+}
+
+static void diag_path_msg(const char *path, const char *msg)
+{
+    (void)cli_fputs(stderr, "wc: ");
+    (void)diag_fputs_quoted(stderr, path);
+    (void)cli_fprintf(stderr, ": %s\n", msg);
+}
+
+static void diag_path_errno(const char *path, int saved_errno)
+{
+    (void)cli_fputs(stderr, "wc: ");
+    (void)diag_fputs_quoted(stderr, path);
+    (void)cli_fprintf(stderr, ": %s\n", strerror(saved_errno));
+}
+
+static void diag_path_wc(const char *path, int wc_rc)
+{
+    (void)cli_fputs(stderr, "wc: ");
+    (void)diag_fputs_quoted(stderr, path);
+    (void)cli_fprintf(stderr, ": %s\n", wc_errstr(wc_rc));
+}
+
+static void diag_path_wc_after(const char *path, int wc_rc, uintmax_t bytes)
+{
+    (void)cli_fputs(stderr, "wc: ");
+    (void)diag_fputs_quoted(stderr, path);
+    (void)cli_fprintf(stderr,
+                      ": %s (after %" PRIuMAX " bytes)\n",
+                      wc_errstr(wc_rc),
+                      bytes);
+}
+
 static int print_usage(FILE *out)
 {
     return cli_fprintf(
@@ -389,7 +451,7 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
             } else if (strcmp(fmt, "json") == 0) {
                 opts->format = FORMAT_JSON;
             } else {
-                (void)fprintf(stderr, "wc: unknown format: %s\n", fmt);
+                diag_arg("wc: unknown format: ", fmt);
                 return -1;
             }
         } else if (strcmp(arg, "--color") == 0) {
@@ -404,11 +466,11 @@ parse_cli_opts(int argc, char **argv, cli_opts *opts, int *first_file_index)
             } else if (strcmp(val, "never") == 0) {
                 opts->color = COLOR_NEVER;
             } else {
-                (void)fprintf(stderr, "wc: unknown color mode: %s\n", val);
+                diag_arg("wc: unknown color mode: ", val);
                 return -1;
             }
         } else {
-            (void)fprintf(stderr, "wc: unknown option: %s\n", arg);
+            diag_arg("wc: unknown option: ", arg);
             return -1;
         }
     }
@@ -564,7 +626,7 @@ static int process_file(wc *w, const char *path, run_stats *stats)
     fp = fopen(path, "rb");
 #endif
     if (!fp) {
-        (void)fprintf(stderr, "wc: %s: %s\n", path, strerror(errno));
+        diag_path_errno(path, errno);
         if (stats)
             stats->files_failed++;
         return -1;
@@ -572,7 +634,7 @@ static int process_file(wc *w, const char *path, run_stats *stats)
 
     st = wc_stream_open(w, &open_rc);
     if (!st) {
-        (void)fprintf(stderr, "wc: %s: %s\n", path, wc_errstr(open_rc));
+        diag_path_wc(path, open_rc);
         fclose(fp);
         if (stats)
             stats->files_failed++;
@@ -585,15 +647,11 @@ static int process_file(wc *w, const char *path, run_stats *stats)
             size_t consumed = 0;
             int scan_rc = wc_stream_scan_ex(st, buf, n, &consumed);
             if (add_uintmax_checked(&total_bytes, consumed) < 0) {
-                (void)fprintf(stderr, "wc: %s: input too large\n", path);
+                diag_path_msg(path, "input too large");
                 goto done;
             }
             if (scan_rc != WC_OK) {
-                (void)fprintf(stderr,
-                              "wc: %s: %s (after %" PRIuMAX " bytes)\n",
-                              path,
-                              wc_errstr(scan_rc),
-                              total_bytes);
+                diag_path_wc_after(path, scan_rc, total_bytes);
                 goto done;
             }
         }
@@ -601,10 +659,11 @@ static int process_file(wc *w, const char *path, run_stats *stats)
         if (n < sizeof buf) {
             if (ferror(fp)) {
                 int e = errno;
-                (void)fprintf(stderr,
-                              "wc: %s: %s\n",
-                              path,
-                              e ? strerror(e) : "I/O error");
+                if (e) {
+                    diag_path_errno(path, e);
+                } else {
+                    diag_path_msg(path, "I/O error");
+                }
                 goto done;
             }
             break;
@@ -613,7 +672,7 @@ static int process_file(wc *w, const char *path, run_stats *stats)
 
     rc = wc_stream_finish(st);
     if (rc != WC_OK) {
-        (void)fprintf(stderr, "wc: %s: %s\n", path, wc_errstr(rc));
+        diag_path_wc(path, rc);
         rc = -1;
         goto done;
     }
@@ -623,14 +682,14 @@ static int process_file(wc *w, const char *path, run_stats *stats)
 done:
     if (rc == 0 && stats &&
         add_uintmax_checked(&stats->bytes_processed, total_bytes) < 0) {
-        (void)fprintf(stderr, "wc: %s: input too large\n", path);
+        diag_path_msg(path, "input too large");
         rc = -1;
     }
     if (st)
         wc_stream_close(st);
     if (fp && fclose(fp) != 0) {
         if (rc == 0) {
-            (void)fprintf(stderr, "wc: %s: %s\n", path, strerror(errno));
+            diag_path_errno(path, errno);
             rc = -1;
         }
     }
@@ -1008,9 +1067,16 @@ static const char *yn(int v)
     return v ? "yes" : "no";
 }
 
-#define BUILD_CFG_HAS(cfg_, field_)                                       \
-    ((cfg_) && (cfg_)->struct_size >= offsetof(wc_build_config, field_) + \
-                                              sizeof((cfg_)->field_))
+static int
+build_cfg_has_field(const wc_build_config *cfg, size_t offset, size_t size)
+{
+    return cfg != NULL && offset <= WC_SIZE_MAX - size &&
+           cfg->struct_size >= offset + size;
+}
+
+#define BUILD_CFG_HAS(cfg_, field_) \
+    build_cfg_has_field(            \
+            (cfg_), offsetof(wc_build_config, field_), sizeof((cfg_)->field_))
 
 /* --- Main -------------------------------------------------------------- */
 

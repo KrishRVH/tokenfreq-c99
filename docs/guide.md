@@ -41,6 +41,8 @@ wc_stream_close(s);
 
 - `wc_scan` and `wc_stream_scan_ex` reject buffers larger than `WC_PTRDIFF_MAX`
   with `WC_ERROR`.
+- Zero-length scan/add chunks are no-ops; length-based APIs may receive `NULL`
+  input pointers only when the length is zero.
 - If `wc_stream_finish` returns `WC_NOMEM`, the trailing word remains buffered
   and the stream is not finished; retry after resolving the resource condition.
   Other finish return codes are terminal and idempotent: after they run,
@@ -115,6 +117,8 @@ Preconditions:
 - `WC_MIN_INIT_CAP` and `WC_DEFAULT_INIT_CAP` are compile-time table-capacity
   macros; keep them as positive powers of two that fit one internal table
   object within `WC_PTRDIFF_MAX`.
+- `WC_HASH_STRONG=1` is the default. Set `WC_HASH_STRONG=0` only for
+  trusted-input FNV-1a builds.
 
 ## Error Handling Patterns
 

@@ -56,7 +56,7 @@ For a concise reference, see:
 9. [Testing, Fuzzing, and OOM Injection](#testing-fuzzing-and-oom-injection)
 10. [Portability and Platform Assumptions](#portability-and-platform-assumptions)
 11. [Adversarial Inputs and Complexity](#adversarial-inputs-and-complexity)
-12. [ABI and Build Configuration Compatibility](#abi-and-build-configuration-compatibility)
+12. [Build Configuration Introspection](#build-configuration-introspection)
 13. [Performance and Complexity](#performance-and-complexity)
 14. [Versioning and Compatibility Notes](#versioning-and-compatibility-notes)
 15. [Guidelines for Contributors](#guidelines-for-contributors)
@@ -155,10 +155,10 @@ The library deliberately does **not** try to:
   `wc_stream` requires external synchronization.
 - Support arbitrary text encodings or EBCDIC  
   It assumes an ASCII-compatible execution character set.
-- Provide cryptographic or DoS-hard hashing  
-  Default FNV-1a hashing is used for speed and reproducibility; SipHash-2-4 is
-  available with `WC_HASH_STRONG=1`. Neither mode is documented as a
-  cryptographic or DoS-hard defense.
+- Provide a complete CPU DoS boundary by itself
+  SipHash-2-4 is the default hash, and FNV-1a remains available with
+  `WC_HASH_STRONG=0` for trusted-input builds. Neither mode is a substitute for
+  request-level CPU/time limits on hostile workloads.
 
 ---
 
@@ -203,12 +203,15 @@ A `wc` instance (opaque handle) tracks:
 Hash function and storage:
 
 - Each slot stores a precomputed 32-bit hash.
-- Default hashing is FNV-1a over the stored bytes, using a per-instance basis derived from the FNV offset and optional `wc_limits.hash_seed`.
-- With `WC_HASH_STRONG=1`, hashing switches to SipHash-2-4 keyed from `hash_seed` and the stored slot hash is the low 32 bits (used for indexing and fast rejection).
+- Default hashing is SipHash-2-4 keyed from `wc_limits.hash_seed`; the stored
+  slot hash is the low 32 bits used for indexing and fast rejection.
+- With `WC_HASH_STRONG=0`, hashing switches to FNV-1a over the stored bytes,
+  using a per-instance basis derived from the FNV offset and optional
+  `wc_limits.hash_seed`.
 
 
 ```c
-/* Conceptual (default build) */
+/* Conceptual (WC_HASH_STRONG=0 build) */
 wc_hash_t h = basis;
 for each byte c:
     h ^= (unsigned char)c;
@@ -421,7 +424,7 @@ All public functions follow a clear error protocol:
 * `wc_results`:
 
   * Returns `WC_OK`, `WC_ERROR`, or `WC_NOMEM`
-  * On `WC_OK` with no entries: `*out == NULL`, `*n == 0`
+  * On `WC_OK` with no entries in heap-enabled builds: `*out == NULL`, `*n == 0`
 * `wc_errstr` converts any result code into a human-readable static string.
 * When `WC_HAVE_ERRNO != 0`, APIs may set `errno` on failure as a diagnostic.
   Only the return code (and `err_out` where present) is the stable contract.
@@ -622,6 +625,8 @@ Key semantics:
   not tokenize. Embedded `'\0'` terminates the word.
 * `wc_scan` is case-insensitive under the same folding rules and performs
   tokenization. `len > WC_PTRDIFF_MAX` is rejected with `WC_ERROR`.
+* Zero-length `wc_add_n`, `wc_add_norm_n`, and `wc_scan` calls are no-ops and
+  may pass `NULL` for the input pointer.
 * Words are truncated at `max_word` and the hash/equality operate on the stored prefix.
 
 Partial-progress semantics under `WC_NOMEM`:
@@ -857,9 +862,10 @@ ctest --preset clang
 Available configure presets (see `CMakePresets.json`):
 
 * `clang` – Clang (Debug + ASan/UBSan)
-* `clang-stronghash` – Clang (ASan/UBSan + `WC_HASH_STRONG=ON`)
 * `gcc` – GCC (Debug + ASan/UBSan)
 * `compcert` – CompCert (ccomp; no sanitizers)
+* `install-check` – Clang install/package consumer check
+* `coverage` – GCC coverage instrumentation
 * `mingw` – MinGW-w64 cross (static exe)
 
 Sanitizers are applied to executables and shared/module libraries on native
@@ -878,7 +884,8 @@ Notable CMake options:
 * `WC_INSTALL_PKGCONFIG` – install `wordcount.pc` when `WC_INSTALL=ON`
   (default on).
 * `WC_ENABLE_VALIDATE` – enable `wc_validate` invariant walk (debug/fuzz builds).
-* `WC_HASH_STRONG` – build with SipHash-2-4 instead of FNV-1a.
+* `WC_HASH_STRONG` – build with SipHash-2-4 (default on); set off only for
+  trusted-input FNV-1a builds.
 * `WC_USE_LIBC_STRING` – use libc string/memory functions (default on).
 * `WC_BUILD_VARIANTS` – build heap/tiny library variants (same symbols; off by
   default for installs, enabled automatically when `BUILD_TESTING` is on).
@@ -911,13 +918,14 @@ Installed files include:
 
 Hosted (default): no extra defines needed.
 
-Freestanding / exotic toolchains:
+Freestanding / exotic toolchains have two common profiles.
+
+Libc-light, heap-enabled:
 
 * `-DWC_STDC_HOSTED=0`
 * `-DWC_USE_LIBC_STRING=0`
 * `-DWC_USE_LIBC_QSORT=0`
 * `-DWC_HAVE_ERRNO=0`
-* `-DWC_NO_HEAP=1`
 * `-DWC_OMIT_ASSERT=1`
 * `-DWC_U32_T=your_uint32_type`
 * `-DWC_U64_T=your_uint64_type` (only needed with `WC_HASH_STRONG=1`)
@@ -928,6 +936,12 @@ Custom `WC_U32_T` / `WC_U64_T` types must not require stricter alignment than
 * `-DWC_HAVE_UINTPTR=0` if `<stdint.h>` is unavailable or has no `uintptr_t`
 * `-DWC_LINEAR_UINTPTR_ALIGNMENT=0` if `uintptr_t` exists only for pointer
   round-tripping and cannot be used for modulo alignment checks
+
+Libc-free heapless adds:
+
+* `-DWC_NO_HEAP=1`
+* `-DWC_STACK_BUFFER=0`
+* caller-supplied static storage through `wc_limits.static_buf`
 
 Tiny RAM profile:
 
@@ -951,22 +965,22 @@ This script:
 1. Builds + tests:
 
    * `clang`
-   * `clang-stronghash`
    * `gcc`
 2. Optionally, if available:
 
    * `compcert` (if `ccomp` exists)
    * `mingw` (if `x86_64-w64-mingw32-gcc` exists; tests skipped by default)
-3. Runs `./c-quality.sh`:
+3. Runs the `install-check` package/consumer test.
+4. Runs `./c-quality.sh`:
 
-   * `clang-format` (in-place)
-   * `clang-tidy` (deterministic C99 parse profile)
-   * `cppcheck` (uses `compile_commands.json` when present)
+   * required `clang-format` (check-only)
+   * required `clangd --clang-tidy` semantic checks using `compile_commands.json`
+   * `cppcheck` when available (uses `compile_commands.json` when present)
 
 ### Direct Compilation
 
 ```bash
-cc -std=c99 -O2 -DWC_HASH_STRONG=1 wordcount.c your_program.c -o your_program
+cc -std=c99 -O2 wordcount.c your_program.c -o your_program
 ```
 
 CLI:
@@ -983,14 +997,18 @@ cc -std=c99 -O2 -DWC_STACK_BUFFER=0 wordcount.c your_program.c -o your_program
 
 ### Continuous Integration
 
-GitHub Actions currently runs Linux preset builds for `clang`,
-`clang-stronghash`, and `gcc`, plus a clang fuzz smoke test. It also runs the
-`clang` preset on macOS and a raw Visual Studio Debug CMake build on Windows.
-The CMake test matrix includes default, heap-scan-buffer, tiny, forced-hash,
-no-heap/static-buffer, pointer-alignment, pointer-span cap, collision,
-counter-overflow, compile-only C/C++ compatibility, invalid configuration,
-CLI output-error, pkg-config relocatability, and portable fault-injection
-targets.
+GitHub Actions is manual-dispatch only. Linux covers the `clang` and `gcc`
+presets plus the fuzz smoke test, macOS runs the `clang` preset, and Windows
+runs a Visual Studio Debug CMake build. Local release checks remain stricter:
+`mise run standards:check` runs secret scanning, formatting checks, static
+analysis, the one-shot build/test/package gamut, and the strict local quality
+gate.
+
+The CMake test matrix includes default, FNV-hash, heap-scan-buffer, tiny,
+full-table tiny, forced-hash, no-heap/static-buffer, pointer-alignment,
+pointer-span cap, collision, counter-overflow, compile-only C/C++ compatibility,
+invalid configuration, CLI contract/output-error checks, pkg-config/CMake
+package relocatability, fuzzer smoke, and portable fault-injection targets.
 
 ### Directory Layout
 
@@ -1107,13 +1125,14 @@ emits a header only when rows are displayed; JSON emits both `words` and
 `summary`. If no words pass filters, a short notice is printed to stderr for
 non-JSON, non-quiet output.
 
+On Windows, file paths are treated as UTF-8 consistently for streaming.
+
 Exit codes:
 
 * `0` if all inputs processed successfully (even if no words found)
 * `1` for runtime failures (I/O, allocation/OOM, invalid `WC_MAX_BYTES`, output
   errors)
 * `2` for usage/argument errors
-* On Windows, file paths are treated as UTF-8 consistently for streaming.
 
 ---
 
@@ -1127,12 +1146,13 @@ cmake --build --preset clang
 ctest --preset clang
 ```
 
-The preset test graph covers the default library, heap-scan-buffer and tiny
-variants, no-heap/static-buffer configurations, pointer-alignment fallbacks,
-forced hash-collision paths, counter overflow, pointer-span caps, portable
-allocation-fault injection, compile-only C/C++ checks, invalid compile-time
-configurations, CLI output errors, and pkg-config relocatability when install
-tests are enabled without sanitizers.
+The preset test graph covers the default library, FNV-hash,
+heap-scan-buffer and tiny variants, no-heap/static-buffer configurations,
+pointer-alignment fallbacks, forced hash-collision paths, counter overflow,
+pointer-span caps, portable allocation-fault injection, compile-only C/C++
+checks, invalid compile-time configurations, CLI contract/output errors, fuzzer
+smoke, and pkg-config/CMake package relocatability when install tests are
+enabled without sanitizers.
 
 OOM injection (glibc only):
 
@@ -1168,7 +1188,8 @@ clang -std=c99 -O1 -g -fsanitize=address,undefined,fuzzer \
 * `wc_scan` accepts arbitrary byte sequences up to `WC_PTRDIFF_MAX` bytes
   (including embedded NULs); `wc_add_n` and `wc_add_norm_n` truncate at the first
   embedded `'\0'` to keep stored words valid C strings for sorting/comparison.
-* Not cryptographic / not DoS-hard hashing.
+* Default SipHash-2-4 hashing reduces predictable collision behavior but is not
+  a complete CPU DoS boundary by itself.
 * For untrusted inputs:
 
   * consider non-zero `hash_seed`
@@ -1176,10 +1197,9 @@ clang -std=c99 -O1 -g -fsanitize=address,undefined,fuzzer \
 
 ### Hardening Guide
 
-- Enable stronger keyed hashing: compile with `-DWC_HASH_STRONG=1` (or, when
-  using CMake, configure with `-DWC_HASH_STRONG=ON`) and set a nonzero
-  per-instance `wc_limits.hash_seed`. Default FNV seeding is only perturbation,
-  not a DoS defense.
+- Keep default strong hashing enabled and set a nonzero per-instance
+  `wc_limits.hash_seed` for hostile inputs. Compile with `-DWC_HASH_STRONG=0`
+  only for trusted-input FNV-1a builds.
 - Bound memory: use `wc_limits.max_bytes` (or `WC_MAX_BYTES`/`--max-bytes`) with strict mode when a hard peak cap is required and, for known workloads, `wc_reserve` as a best-effort preflight.
 - For adversarial CPU limits, combine strong hashing with external CPU/time
   limits; memory caps are not CPU caps.
