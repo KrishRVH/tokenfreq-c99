@@ -163,15 +163,15 @@ static int wc_memcmp_internal(const void *a, const void *b, size_t n)
 #endif
 }
 
-static void *wc_memchr_internal(const void *s, int c, size_t n)
+static const void *wc_memchr_internal(const void *s, int c, size_t n)
 {
 #if WC_INTERNAL_BOOL(WC_USE_LIBC_STRING)
-    return (void *)memchr(s, c, n);
+    return memchr(s, c, n);
 #else
     const unsigned char *p = (const unsigned char *)s;
     for (size_t i = 0; i < n; i++) {
         if (p[i] == (unsigned char)c)
-            return (void *)(p + i);
+            return p + i;
     }
     return NULL;
 #endif
@@ -1447,7 +1447,7 @@ static void *arena_alloc(wc *w, size_t sz)
     /* Fresh block starts at allocator alignment; pad from the address to
        preserve WC_ALIGN even if the header offset is not aligned. */
     {
-        const char *cur = b->cur;
+        char *cur = b->cur;
 #if WC_INTERNAL_BOOL(WC_HAVE_UINTPTR) && \
         WC_INTERNAL_BOOL(WC_LINEAR_UINTPTR_ALIGNMENT)
         const uintptr_t cur_addr = (uintptr_t)cur;
@@ -1456,7 +1456,7 @@ static void *arena_alloc(wc *w, size_t sz)
         size_t offset = offsetof(Block, buf);
         pad = (align - (offset % align)) % align;
 #endif
-        p = (char *)(cur + pad);
+        p = cur + pad;
     }
     b->cur = p + sz;
     WC_ASSERT(b->cur <= b->end);

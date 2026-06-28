@@ -6,7 +6,7 @@
 static int expect(int cond, const char *msg)
 {
     if (!cond) {
-        fprintf(stderr, "%s\n", msg);
+        (void)fprintf(stderr, "%s\n", msg);
         return 1;
     }
     return 0;
@@ -20,7 +20,7 @@ int main(void)
 
     wc *w = wc_open(16);
     if (!w) {
-        fprintf(stderr, "wc_open failed\n");
+        (void)fprintf(stderr, "wc_open failed\n");
         return 1;
     }
 

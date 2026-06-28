@@ -82,6 +82,13 @@ typedef char wc_cli_chunk_must_fit_ptrdiff
         [(STDIN_CHUNK <= (size_t)WC_PTRDIFF_MAX) ? 1 : -1];
 typedef char wc_cli_chunk_must_fit_size[(STDIN_CHUNK <= WC_SIZE_MAX) ? 1 : -1];
 
+#if defined(__GNUC__) || defined(__clang__)
+#define WC_CLI_PRINTF(fmt_index, first_arg) \
+    __attribute__((format(printf, fmt_index, first_arg)))
+#else
+#define WC_CLI_PRINTF(fmt_index, first_arg)
+#endif
+
 #ifndef EFBIG
 #define EFBIG ERANGE
 #endif
@@ -197,6 +204,8 @@ static int add_uintmax_checked(uintmax_t *acc, uintmax_t n)
     *acc += (uintmax_t)n;
     return 0;
 }
+
+static int cli_fprintf(FILE *out, const char *fmt, ...) WC_CLI_PRINTF(2, 3);
 
 static int cli_fprintf(FILE *out, const char *fmt, ...)
 {
@@ -635,7 +644,7 @@ static int process_file(wc *w, const char *path, run_stats *stats)
     st = wc_stream_open(w, &open_rc);
     if (!st) {
         diag_path_wc(path, open_rc);
-        fclose(fp);
+        (void)fclose(fp);
         if (stats)
             stats->files_failed++;
         return -1;
@@ -1277,8 +1286,6 @@ int main(int argc, char **argv)
                     err = 1;
                 break;
             }
-            default:
-                break;
         }
     }
     if (!err && (cli_flush(stdout) < 0 || cli_flush(stderr) < 0))

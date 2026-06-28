@@ -37,6 +37,8 @@
 
 #include "wordcount.h"
 
+int wc_compile_msvc_sal_probe(void);
+
 int wc_compile_msvc_sal_probe(void)
 {
     return 0;

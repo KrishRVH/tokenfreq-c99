@@ -663,6 +663,11 @@ typedef struct wc_limits {
 /* If you append fields to wc_limits, update the C++ initializer list here. */
 #ifdef __cplusplus
 /* C++ aggregate init: fully initialize to avoid -Wmissing-field-initializers. */
+#if __cplusplus >= 201103L
+#define WC_NULLPTR_INIT nullptr
+#else
+#define WC_NULLPTR_INIT static_cast<void *>(0)
+#endif
 #define WC_LIMITS_INIT()                          \
     {                                             \
         sizeof(wc_limits), /* struct_size */      \
@@ -670,7 +675,7 @@ typedef struct wc_limits {
         0,                 /* strict_max_bytes */ \
         0,                 /* init_cap */         \
         0,                 /* block_size */       \
-        0,                 /* static_buf */       \
+        WC_NULLPTR_INIT,   /* static_buf */       \
         0,                 /* static_size */      \
         0ul                /* hash_seed */        \
     }

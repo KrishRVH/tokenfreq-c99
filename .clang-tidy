@@ -4,9 +4,9 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   cert-*,
   clang-analyzer-*,
-  portability-*,
   performance-*,
+  portability-*,
   readability-misleading-indentation
-WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
+WarningsAsErrors: 'bugprone-*,cert-*,clang-analyzer-*,performance-*,portability-*,readability-misleading-indentation'
 HeaderFilterRegex: 'wordcount\.h|wc_.*\.c'
 FormatStyle: none

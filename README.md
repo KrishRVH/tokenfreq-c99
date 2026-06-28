@@ -879,6 +879,10 @@ Notable CMake options:
 * `ENABLE_SANITIZERS` – enable AddressSanitizer/UBSan on supported native
   GCC/Clang executable and shared/module targets.
 * `WC_WERROR` – treat supported compiler warnings as errors.
+  GCC/Clang builds use an intentionally broad warning profile, including
+  const-cast, alignment-cast, prototype/declaration, format, enum-switch,
+  pointer-arithmetic, VLA/alloca, duplicated-logic, and Clang-specific
+  reachability/narrowing diagnostics where supported.
 * `WC_BUILD_CLI` – build the `wc` command-line tool (default on).
 * `WC_BUILD_SHARED` / `BUILD_SHARED_LIBS` – build shared libraries in addition
   to static libraries.
@@ -979,8 +983,20 @@ This script:
 4. Runs `./c-quality.sh`:
 
    * required `clang-format` (check-only)
+   * strict syntax-only warning checks over repository C sources, including
+     untracked non-ignored files, with the configured GCC/Clang-compatible C
+     compiler when supported plus installed GCC/Clang variants
+   * strict C++11 warning checks over C++ compatibility sources, including
+     untracked non-ignored files, with available GCC/Clang-compatible C++
+     compilers; if C++ sources exist and none run, the gate fails
    * required `clangd --clang-tidy` semantic checks using `compile_commands.json`
+     with bugprone, CERT, analyzer, performance, portability, and
+     misleading-indentation diagnostics promoted to errors; missing compile
+     database discovery is a hard failure
    * `cppcheck` when available (uses `compile_commands.json` when present)
+   * cppcheck's MISRA addon when available; actual MISRA rule diagnostics are
+     hard failures, while cppcheck's non-actionable `misra-config` parser noise
+     is suppressed
 
 ### Direct Compilation
 

@@ -37,6 +37,89 @@ if(WC_C_COMPILER_BASENAME MATCHES "^(ccomp|ccomp\\.exe)$")
   set(WC_COMPILER_IS_COMPCERT ON)
 endif()
 
+set(WC_STRICT_C_WARNINGS
+  -Wall
+  -Wextra
+  -Wpedantic
+  -Wconversion
+  -Wshadow
+  -Wcast-align
+  -Wcast-qual
+  -Wstrict-prototypes
+  -Wold-style-definition
+  -Wmissing-prototypes
+  -Wmissing-declarations
+  -Wredundant-decls
+  -Wnested-externs
+  -Wpointer-arith
+  -Wwrite-strings
+  -Wformat=2
+  -Winit-self
+  -Wundef
+  -Wbad-function-cast
+  -Wswitch-enum
+  -Wfloat-equal
+  -Walloca
+  -Wvla
+  -Wdate-time
+)
+set(WC_STRICT_GNU_C_WARNINGS
+  -Wcast-align=strict
+  -Wduplicated-branches
+  -Wduplicated-cond
+  -Wlogical-op
+  -Wstrict-overflow=5
+)
+set(WC_STRICT_CLANG_C_WARNINGS
+  -Wassign-enum
+  -Wcovered-switch-default
+  -Wextra-semi
+  -Wmissing-variable-declarations
+  -Wnewline-eof
+  -Wshorten-64-to-32
+  -Wunreachable-code-aggressive
+)
+set(WC_STRICT_CXX_WARNINGS
+  -Wall
+  -Wextra
+  -Wpedantic
+  -Wconversion
+  -Wshadow
+  -Wcast-align
+  -Wcast-qual
+  -Wold-style-cast
+  -Wmissing-declarations
+  -Wredundant-decls
+  -Wpointer-arith
+  -Wwrite-strings
+  -Wformat=2
+  -Winit-self
+  -Wundef
+  -Wswitch-enum
+  -Wfloat-equal
+  -Walloca
+  -Wvla
+  -Wdate-time
+  -Wzero-as-null-pointer-constant
+)
+set(WC_STRICT_GNU_CXX_WARNINGS
+  -Wcast-align=strict
+  -Wduplicated-branches
+  -Wduplicated-cond
+  -Wlogical-op
+  -Wstrict-overflow=5
+  -Wuseless-cast
+)
+set(WC_STRICT_CLANG_CXX_WARNINGS
+  -Wassign-enum
+  -Wcovered-switch-default
+  -Wextra-semi
+  -Wmissing-variable-declarations
+  -Wnewline-eof
+  -Wshorten-64-to-32
+  -Wunreachable-code-aggressive
+)
+
 function(wc_apply_common target)
   get_target_property(_type ${target} TYPE)
   set(_is_interface OFF)
@@ -67,8 +150,11 @@ function(wc_apply_common target)
 
   # Warnings: keep strict for GCC/Clang, conservative for CompCert, MSVC-friendly
   if(MSVC)
-    # /permissive- is primarily a C++ conformance switch; this is a C-only project.
-    target_compile_options(${target} ${_opt_scope} /W4)
+    target_compile_options(${target} ${_opt_scope}
+      /W4
+      /sdl
+      "$<$<COMPILE_LANGUAGE:CXX>:/permissive->"
+    )
     if(WC_WERROR)
       target_compile_options(${target} ${_opt_scope} /WX)
     endif()
@@ -80,11 +166,18 @@ function(wc_apply_common target)
     endif()
   else()
     target_compile_options(${target} ${_opt_scope}
-      "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>"
-      "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>"
+      "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:${WC_STRICT_C_WARNINGS}>"
+      "$<$<COMPILE_LANG_AND_ID:C,GNU>:${WC_STRICT_GNU_C_WARNINGS}>"
+      "$<$<COMPILE_LANG_AND_ID:C,Clang,AppleClang>:${WC_STRICT_CLANG_C_WARNINGS}>"
+      "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:${WC_STRICT_CXX_WARNINGS}>"
+      "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:${WC_STRICT_GNU_CXX_WARNINGS}>"
+      "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:${WC_STRICT_CLANG_CXX_WARNINGS}>"
     )
     if(WC_WERROR)
-      target_compile_options(${target} ${_opt_scope} -Werror)
+      target_compile_options(${target} ${_opt_scope}
+        "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Werror>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Werror>"
+      )
     endif()
   endif()
 
