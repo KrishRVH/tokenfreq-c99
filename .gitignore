@@ -43,6 +43,12 @@ node_modules/
 /out/
 /sbom/
 
+# Benchmark generated output
+/benchmark/bench_data/
+/benchmark/bin/
+/benchmark/build/
+/benchmark/results*/
+
 # JavaScript / TypeScript
 *.tsbuildinfo
 .eslintcache

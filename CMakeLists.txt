@@ -13,6 +13,7 @@ option(WC_BUILD_SHARED "Build shared libraries (in addition to static)" OFF)
 option(WC_INSTALL_PKGCONFIG "Install pkg-config metadata when WC_INSTALL is ON" ON)
 option(WC_HASH_STRONG "Use keyed SipHash-2-4 instead of FNV-1a" ON)
 option(WC_USE_LIBC_STRING "Use libc string/memory functions" ON)
+option(WC_USE_LIBC_QSORT "Use libc qsort; otherwise use internal heapsort" ON)
 option(WC_ENABLE_VALIDATE "Compile wc_validate() invariant checks" OFF)
 option(WC_BUILD_VARIANTS "Build heap/tiny library variants (same symbols; do not link together)" OFF)
 
@@ -87,7 +88,7 @@ function(wc_apply_common target)
     endif()
   endif()
 
-  foreach(_wc_def HASH_STRONG USE_LIBC_STRING ENABLE_VALIDATE)
+  foreach(_wc_def HASH_STRONG USE_LIBC_STRING USE_LIBC_QSORT ENABLE_VALIDATE)
     get_target_property(_wc_${_wc_def} ${target} WC_DEF_${_wc_def})
     if(_wc_${_wc_def} STREQUAL "_wc_${_wc_def}-NOTFOUND")
       set(_wc_${_wc_def} "$<IF:$<BOOL:${WC_${_wc_def}}>,1,0>")
@@ -97,6 +98,7 @@ function(wc_apply_common target)
   target_compile_definitions(${target} ${_def_scope}
     WC_HASH_STRONG=${_wc_HASH_STRONG}
     WC_USE_LIBC_STRING=${_wc_USE_LIBC_STRING}
+    WC_USE_LIBC_QSORT=${_wc_USE_LIBC_QSORT}
     WC_ENABLE_VALIDATE=${_wc_ENABLE_VALIDATE}
   )
 
@@ -247,6 +249,12 @@ endif()
 # =============================================================================
 
 if(BUILD_TESTING)
+  if(TARGET wc AND NOT WC_USE_LIBC_QSORT)
+    add_test(NAME wc_cli_no_libc_qsort_config COMMAND wc --version)
+    set_tests_properties(wc_cli_no_libc_qsort_config PROPERTIES
+      PASS_REGULAR_EXPRESSION "libc-qsort=no")
+  endif()
+
   include(CheckLanguage)
   check_language(CXX)
   if(CMAKE_CXX_COMPILER)
@@ -256,7 +264,7 @@ if(BUILD_TESTING)
   function(create_test_variant name lib)
     add_executable(${name} wc_test.c)
     target_link_libraries(${name} PRIVATE ${lib})
-    foreach(_wc_def HASH_STRONG USE_LIBC_STRING ENABLE_VALIDATE)
+    foreach(_wc_def HASH_STRONG USE_LIBC_STRING USE_LIBC_QSORT ENABLE_VALIDATE)
       get_target_property(_wc_${_wc_def} ${lib} WC_DEF_${_wc_def})
       if(NOT _wc_${_wc_def} STREQUAL "_wc_${_wc_def}-NOTFOUND")
         set_target_properties(${name} PROPERTIES
@@ -374,11 +382,11 @@ if(BUILD_TESTING)
   add_library(wordcount_lib_noheap_tiny_autotune STATIC wordcount.c)
   set_target_properties(wordcount_lib_noheap_tiny_autotune PROPERTIES
     WC_DEF_USE_LIBC_STRING 0
+    WC_DEF_USE_LIBC_QSORT 0
   )
   target_compile_definitions(wordcount_lib_noheap_tiny_autotune PUBLIC
     WC_NO_HEAP=1
     WC_STDC_HOSTED=0
-    WC_USE_LIBC_QSORT=0
     WC_HAVE_ERRNO=0
     WC_MAX_WORD=4
     WC_MIN_INIT_CAP=1
@@ -394,6 +402,7 @@ if(BUILD_TESTING)
     wordcount_lib_noheap_tiny_autotune)
   set_target_properties(wc_test_noheap_tiny_autotune PROPERTIES
     WC_DEF_USE_LIBC_STRING 0
+    WC_DEF_USE_LIBC_QSORT 0
   )
   wc_apply_common(wc_test_noheap_tiny_autotune)
   add_test(NAME wc_test_noheap_tiny_autotune
@@ -529,6 +538,7 @@ if(BUILD_TESTING)
   add_library(wc_compile_noheap_libclight OBJECT wordcount.c)
   set_target_properties(wc_compile_noheap_libclight PROPERTIES
     WC_DEF_USE_LIBC_STRING 0
+    WC_DEF_USE_LIBC_QSORT 0
   )
   wc_apply_common(wc_compile_noheap_libclight)
   if(MSVC)
@@ -540,13 +550,13 @@ if(BUILD_TESTING)
     WC_STDC_HOSTED=0
     WC_NO_HEAP=1
     WC_STACK_BUFFER=0
-    WC_USE_LIBC_QSORT=0
     WC_HAVE_ERRNO=0
     WC_OMIT_ASSERT=1
   )
   add_library(wc_compile_noheap_libclight_nouintptr OBJECT wordcount.c)
   set_target_properties(wc_compile_noheap_libclight_nouintptr PROPERTIES
     WC_DEF_USE_LIBC_STRING 0
+    WC_DEF_USE_LIBC_QSORT 0
   )
   wc_apply_common(wc_compile_noheap_libclight_nouintptr)
   if(MSVC)
@@ -558,7 +568,6 @@ if(BUILD_TESTING)
     WC_STDC_HOSTED=0
     WC_NO_HEAP=1
     WC_STACK_BUFFER=0
-    WC_USE_LIBC_QSORT=0
     WC_HAVE_ERRNO=0
     WC_OMIT_ASSERT=1
     WC_HAVE_UINTPTR=0

@@ -633,7 +633,10 @@ Partial-progress semantics under `WC_NOMEM`:
 
 * `wc_add*`: on `WC_NOMEM`, the operation failed; counts are unchanged for that attempted insert.
 * `wc_scan`: on `WC_NOMEM`, the function stops at the first failing insertion.
-  Any words fully processed before the failing word remain counted.
+  It is not transactional: any words fully processed before the failing word
+  remain counted. Retrying the same buffer on the same counter may double-count
+  that processed prefix; callers that need all-or-nothing behavior should
+  discard/rebuild the counter or manage their own scan checkpointing.
 
 ### Query and Results Functions
 ```c
@@ -887,6 +890,8 @@ Notable CMake options:
 * `WC_HASH_STRONG` – build with SipHash-2-4 (default on); set off only for
   trusted-input FNV-1a builds.
 * `WC_USE_LIBC_STRING` – use libc string/memory functions (default on).
+* `WC_USE_LIBC_QSORT` – use libc `qsort` for result sorting (default on);
+  set off to use the internal heapsort.
 * `WC_BUILD_VARIANTS` – build heap/tiny library variants (same symbols; off by
   default for installs, enabled automatically when `BUILD_TESTING` is on).
   Install targets include only built variants.

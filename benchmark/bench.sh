@@ -40,6 +40,7 @@ VARIANTS_CSV="default,heap,tiny"
 DO_CLI=0 # optional: also build+benchmark wc_main.c CLI
 QUIET=1  # for benchmarking (no output from the bench binaries)
 PERF=0   # best-effort perf stat capture (optional, Linux)
+TOY_THREADS="${TOY_THREADS:-0}" # 0 => auto; positive N is passed to toyfast
 
 # ------------------------------ Styling ---------------------------------------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -56,7 +57,7 @@ else
   NC=""
 fi
 
-note() { echo "${BLUE}[INFO]${NC} $*"; }
+note() { echo "${BLUE}[INFO]${NC} $*" >&2; }
 warn() { echo "${YELLOW}[WARN]${NC} $*" >&2; }
 die() {
   echo "${RED}[ERR ]${NC} $*" >&2
@@ -73,6 +74,7 @@ Corpus:
   --regen-corpus         Rebuild corpus even if it already exists
   --no-download          Fail if sources are missing; do not fetch from network
   --no-prime-cache       Do not pre-read corpus to warm page cache
+                         (does not force cold-cache measurements)
 
 Benchmark configuration:
   --runs N               Measured runs per implementation (default: $RUNS)
@@ -97,6 +99,10 @@ Output:
 
 Perf:
   --perf                 Best-effort 'perf stat' capture per implementation (Linux)
+
+Environment:
+  TOY_THREADS=N          Linux toyfast threads; 0 means auto (default: $TOY_THREADS)
+  TOY_LTO=1              Opt toyfast into LTO when the compiler supports it
 
 Examples:
   # Quick smoke
@@ -198,6 +204,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if ((DO_TOY)) && ! [[ "$TOY_THREADS" =~ ^[0-9]+$ ]]; then
+  die "TOY_THREADS must be a non-negative integer."
+fi
+
 # ------------------------------ Tools -----------------------------------------
 have() { command -v "$1" > /dev/null 2>&1; }
 
@@ -246,10 +256,15 @@ mkdir -p "$BENCH_DATA_DIR" "$SRC_DIR" "$BUILD_DIR" "$BIN_DIR" "$OUT_ROOT"
 # ------------------------ Helper: file size ----------------------------------
 file_size_bytes() {
   local f="$1"
-  if stat -c%s "$f" > /dev/null 2>&1; then
-    stat -c%s "$f"
+  local sz
+  if sz="$(stat -c%s "$f" 2> /dev/null)"; then
+    printf '%s\n' "$sz"
+  elif sz="$(stat -f%z "$f" 2> /dev/null)"; then
+    printf '%s\n' "$sz"
+  elif [[ -n "$PYTHON_BIN" ]]; then
+    "$PYTHON_BIN" -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$f"
   else
-    stat -f%z "$f"
+    wc -c < "$f" | tr -d '[:space:]'
   fi
 }
 cc_supports_flag() {
@@ -821,12 +836,12 @@ static void *xmap_anon(size_t n) {
     return p;
 }
 
-static HOT void map_init(Map *m, size_t cap_hint) {
+static HOT void map_init(Map *m, size_t cap_hint, size_t min_cap) {
     memset(m, 0, sizeof *m);
 
     /* Clamp for sanity: too small => resize thrash, too big => waste. */
     size_t cap = next_pow2(cap_hint);
-    if (cap < (1u << 16)) cap = (1u << 16);
+    if (cap < min_cap) cap = min_cap;
     if (cap > (1u << 24)) cap = (1u << 24); /* toy clamp */
 
     size_t bytes = cap * sizeof(Entry);
@@ -966,14 +981,15 @@ static void *worker(void *arg) {
     Ctx *c = (Ctx *)arg;
     pin_thread(c->pin_cpu);
 
-    /* Heuristic: big-ish table to reduce grow. */
     size_t chunk_len = (size_t)(c->end - c->start);
-    size_t cap_hint = (chunk_len / 64) + (1u << 16);        /* toy heuristic */
+    /* Keep probing sparse without overallocating every worker. */
+    size_t cap_hint = (chunk_len / 128) + 4096;
 
-    map_init(&c->map, cap_hint);
+    map_init(&c->map, cap_hint, 1u << 12);
 
     const unsigned char *p = c->start;
     const unsigned char *end = c->end;
+    const uint32_t maxw = c->maxw;
 
     uint64_t total = 0;
 
@@ -985,13 +1001,12 @@ static void *worker(void *arg) {
         uint64_t h = 0x9e3779b97f4a7c15ULL;
         uint32_t n = 0;
 
-        while (p < end && is_alpha(*p)) {
+        while (p < end && n < maxw && is_alpha(*p)) {
             unsigned char ch = (unsigned char)(*p++ | 32u);
-            if (n < c->maxw) {
-                h = hstep(h, ch);
-                n++;
-            }
+            h = hstep(h, ch);
+            n++;
         }
+        while (p < end && is_alpha(*p)) p++;
 
         if (n) {
             map_put_span(&c->map, word, n, h, 1);
@@ -1020,12 +1035,16 @@ int main(int argc, char **argv) {
     const char *path = NULL;
     int quiet = 0;
     int threads = 0;        /* 0 => auto */
+    int threads_arg = 0;    /* positive --threads value requested */
     uint32_t maxw = 64;     /* competitor default: 64 */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--quiet")) quiet = 1;
-        else if (!strcmp(a, "--threads") && i + 1 < argc) threads = (int)parse_u64(argv[++i]);
+        else if (!strcmp(a, "--threads") && i + 1 < argc) {
+            threads = (int)parse_u64(argv[++i]);
+            threads_arg = threads > 0;
+        }
         else if (!strcmp(a, "--max-word") && i + 1 < argc) maxw = (uint32_t)parse_u64(argv[++i]);
         else if (a[0] == '-') usage();
         else path = a;
@@ -1053,15 +1072,21 @@ int main(int argc, char **argv) {
     close(fd);
 
     madvise(data, fsize, MADV_SEQUENTIAL);
-    madvise(data, fsize, MADV_HUGEPAGE);
 
     int avail = cpu_allowed_count();
-    if (threads <= 0) threads = avail;
+    if (threads <= 0) {
+        threads = avail;
+        threads_arg = 0;
+    }
     if (threads < 1) threads = 1;
     if (threads > 256) threads = 256;
 
-    /* Avoid threading overhead for small inputs */
-    if (fsize < (16u << 20)) threads = 1;
+    if (!threads_arg) {
+        size_t min_chunk = 32u << 20;
+        int by_size = (int)((fsize + min_chunk - 1u) / min_chunk);
+        if (by_size < 1) by_size = 1;
+        if (threads > by_size) threads = by_size;
+    }
 
     pthread_t *th = (pthread_t *)malloc((size_t)threads * sizeof(*th));
     Ctx *ctx = (Ctx *)malloc((size_t)threads * sizeof(*ctx));
@@ -1069,22 +1094,14 @@ int main(int argc, char **argv) {
 
     size_t chunk = fsize / (size_t)threads;
 
+    size_t s = 0;
     for (int i = 0; i < threads; i++) {
-        size_t s = (size_t)i * chunk;
         size_t e = (i == threads - 1) ? fsize : (size_t)(i + 1) * chunk;
 
-        /* Boundary fix: if start is in middle of a word, skip to end of that word. */
-        if (s > 0 && is_alpha(data[s - 1])) {
-            while (s < fsize && is_alpha(data[s])) s++;
-        }
         if (e < s) {
             e = s;
-        }
-        /* Extend end forward to include a whole word (next chunk will skip). */
-        if (i != threads - 1) {
-            if (e > 0 && is_alpha(data[e - 1])) {
-                while (e < fsize && is_alpha(data[e])) e++;
-            }
+        } else if (i != threads - 1 && e > 0 && is_alpha(data[e - 1])) {
+            while (e < fsize && is_alpha(data[e])) e++;
         }
 
         ctx[i].start = data + s;
@@ -1094,6 +1111,7 @@ int main(int argc, char **argv) {
         ctx[i].pin_cpu = cpu_id_at(i % avail); /* respects taskset affinity */
 
         if (pthread_create(&th[i], NULL, worker, &ctx[i]) != 0) die("pthread_create");
+        s = e;
     }
 
     for (int i = 0; i < threads; i++) {
@@ -1102,24 +1120,28 @@ int main(int argc, char **argv) {
 
     /* Merge into a global map (single-threaded merge, reusing key pointers). */
     uint64_t total_words = 0;
-    size_t total_uniques_est = 0;
     for (int i = 0; i < threads; i++) {
         total_words += ctx[i].total_words;
-        total_uniques_est += ctx[i].map.len;
     }
 
     Map g;
-    memset(&g, 0, sizeof g);
-    /* global cap based on estimated uniques */
-    size_t gcap_hint = (total_uniques_est * 2) + (1u << 16);
-    map_init(&g, gcap_hint);
+    if (threads == 1) {
+        g = ctx[0].map;
+    } else {
+        int gidx = 0;
+        for (int i = 1; i < threads; i++) {
+            if (ctx[i].map.len > ctx[gidx].map.len) gidx = i;
+        }
+        g = ctx[gidx].map;
 
-    for (int i = 0; i < threads; i++) {
-        Map *m = &ctx[i].map;
-        for (size_t j = 0; j < m->cap; j++) {
-            Entry *e = &m->slots[j];
-            if (!e->key) continue;
-            map_put_span(&g, e->key, e->len, e->h, e->cnt);
+        for (int i = 0; i < threads; i++) {
+            if (i == gidx) continue;
+            Map *m = &ctx[i].map;
+            for (size_t j = 0; j < m->cap; j++) {
+                Entry *e = &m->slots[j];
+                if (!e->key) continue;
+                map_put_span(&g, e->key, e->len, e->h, e->cnt);
+            }
         }
     }
 
@@ -1149,6 +1171,16 @@ split_csv() {
   local IFS=','
   read -r -a _out <<< "$csv"
   printf "%s\n" "${_out[@]}"
+}
+
+list_has() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
 }
 
 build_binaries() {
@@ -1193,15 +1225,15 @@ build_binaries() {
         toy_flags+=("-march=native")
       fi
 
-      # Opportunistic: LTO if supported
-      if cc_supports_flag -flto; then
+      # toyfast is one generated translation unit; keep LTO opt-in for portability.
+      if [[ "${TOY_LTO:-0}" == "1" ]] && cc_supports_flag -flto; then
         toy_flags+=("-flto")
       fi
       # Opportunistic: reduce some linkage overhead if supported
-      if cc_supports_flag -fno-plt; then
+      if [[ -z "${CFLAGS_TOY:-}" ]] && cc_supports_flag -fno-plt; then
         toy_flags+=("-fno-plt")
       fi
-      if cc_supports_flag -fno-semantic-interposition; then
+      if [[ -z "${CFLAGS_TOY:-}" ]] && cc_supports_flag -fno-semantic-interposition; then
         toy_flags+=("-fno-semantic-interposition")
       fi
 
@@ -1282,10 +1314,10 @@ run_validation() {
     [[ -x "$bin" ]] || die "Missing binary: $bin"
 
     local a b c d
-    a="$("$bin" "$val" --mode scan | extract_totuniq || true)"
-    b="$("$bin" "$val" --mode stream --chunk "$CHUNK_BYTES" | extract_totuniq || true)"
-    c="$("$bin" "$val" --mode scan_results | extract_totuniq || true)"
-    d="$("$bin" "$val" --mode stream_results --chunk "$CHUNK_BYTES" | extract_totuniq || true)"
+    a="$("$bin" "$val" --mode scan --max-word "$MAX_WORD" | extract_totuniq || true)"
+    b="$("$bin" "$val" --mode stream --chunk "$CHUNK_BYTES" --max-word "$MAX_WORD" | extract_totuniq || true)"
+    c="$("$bin" "$val" --mode scan_results --max-word "$MAX_WORD" | extract_totuniq || true)"
+    d="$("$bin" "$val" --mode stream_results --chunk "$CHUNK_BYTES" --max-word "$MAX_WORD" | extract_totuniq || true)"
 
     if [[ -z "$a" || -z "$b" || -z "$c" || -z "$d" ]]; then
       die "Validation parse failed for variant '$v' (output malformed)"
@@ -1302,6 +1334,21 @@ run_validation() {
 
     note "OK: $v (Total/Unique = $a)"
   done
+
+  if ((DO_TOY)) && [[ "$(uname -s)" == "Linux" ]] &&
+    list_has default "${VARIANTS[@]}" && [[ -x "$BIN_DIR/toyfast" ]]; then
+    local ref got1 got2
+    ref="$("$BIN_DIR/bench_default" "$val" --mode scan --max-word "$MAX_WORD" | extract_totuniq || true)"
+    got1="$("$BIN_DIR/toyfast" "$val" --max-word "$MAX_WORD" --threads 1 | extract_totuniq || true)"
+    got2="$("$BIN_DIR/toyfast" "$val" --max-word "$MAX_WORD" --threads 2 | extract_totuniq || true)"
+    if [[ -z "$ref" || "$got1" != "$ref" || "$got2" != "$ref" ]]; then
+      echo "default:scan : $ref"
+      echo "toyfast:1t   : $got1"
+      echo "toyfast:2t   : $got2"
+      die "Validation failed: toyfast Total/Unique mismatch"
+    fi
+    note "OK: toyfast (Total/Unique = $ref)"
+  fi
 
   note "Validation passed."
 }
@@ -1554,6 +1601,8 @@ system_summary > "$ENV_TXT"
   echo "chunk_bytes=$CHUNK_BYTES"
   echo "pin_cpu=$PIN_CPU"
   echo "nice=$NICE_LEVEL"
+  echo "toy_threads=$TOY_THREADS"
+  echo "toy_lto=${TOY_LTO:-0}"
   echo "corpus=$CORPUS"
   echo "corpus_bytes=$CORPUS_BYTES"
   echo "quiet=$QUIET"
@@ -1600,18 +1649,25 @@ for v in "${VARIANTS[@]}"; do
 done
 
 if ((DO_TOY)) && [[ "$(uname -s)" == "Linux" ]]; then
-  label="toyfast"
   bin="$BIN_DIR/toyfast"
   [[ -x "$bin" ]] || die "Missing toy competitor binary: $bin"
 
-  args=("$bin" "$CORPUS" "--max-word" "$MAX_WORD")
-  if ((QUIET)); then args+=("--quiet"); fi
+  if list_has default "${VARIANTS[@]}" && list_has scan "${MODES[@]}"; then
+    toy_threads_label="$TOY_THREADS"
+    if [[ "$toy_threads_label" == "0" ]]; then toy_threads_label="auto"; fi
+    label="toyfast:scan:${toy_threads_label}"
 
-  cmd="$cmd_prefix_text"
-  for a in "${args[@]}"; do cmd+=$(printf "%q " "$a"); done
+    args=("$bin" "$CORPUS" "--max-word" "$MAX_WORD" "--threads" "$TOY_THREADS")
+    if ((QUIET)); then args+=("--quiet"); fi
 
-  JOB_LABELS+=("$label")
-  JOB_CMDS+=("$cmd")
+    cmd="$cmd_prefix_text"
+    for a in "${args[@]}"; do cmd+=$(printf "%q " "$a"); done
+
+    JOB_LABELS+=("$label")
+    JOB_CMDS+=("$cmd")
+  else
+    warn "Skipping toyfast timing: it is comparable only when default:scan is in the benchmark set."
+  fi
 fi
 
 if ((DO_CLI)); then
